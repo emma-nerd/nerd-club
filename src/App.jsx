@@ -423,7 +423,15 @@ const isRegistered = user && !user.isAnonymous;
         )}
 
         {view === 'support' &&
-            </div>
+            )}
+
+        {view === 'support' && (
+          <div className="flex-1 max-w-4xl mx-auto w-full py-24 px-6 text-center">
+            <div className="text-6xl mb-8">💎</div>
+            <h2 className="text-5xl font-black italic tracking-tighter mb-6 uppercase">Support the <span className="text-indigo-600">Creator</span></h2>
+            <a href="https://www.patreon.com" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-4 bg-[#FF424D] text-white px-12 py-6 rounded-[2.5rem] font-black text-lg uppercase tracking-widest shadow-2xl hover:scale-105 transition-all">Join on Patreon</a>
+          </div>
+        )}
           </div>
         )}
 
