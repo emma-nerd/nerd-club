@@ -1,9 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { createRoot } from 'react-dom/client';
 import { initializeApp } from 'firebase/app';
-import { 
-  getAuth, 
-  onAuthStateChanged, 
+import {
+  getAuth,
+  onAuthStateChanged,
   signInAnonymously,
   createUserWithEmailAndPassword,
   signInWithEmailAndPassword,
@@ -14,24 +13,20 @@ import {
   EmailAuthProvider,
   signOut
 } from 'firebase/auth';
-import { 
-  getFirestore, 
-  collection, 
-  doc, 
-  getDoc, 
+import {
+  getFirestore,
+  collection,
+  doc,
+  getDoc,
   setDoc,
-  addDoc, 
-  onSnapshot, 
-  query, 
-  orderBy, 
-  limit, 
-  serverTimestamp 
+  addDoc,
+  onSnapshot,
+  query,
+  orderBy,
+  limit,
+  serverTimestamp
 } from 'firebase/firestore';
 
-// Firebase Setup
-
-// Your web app's Firebase configuration
-// For Firebase JS SDK v7.20.0 and later, measurementId is optional
 const firebaseConfig = {
   apiKey: "AIzaSyAiLHAahWkJJ5aXMEBJmRPv1UN3jwvL5Qg",
   authDomain: "nerdclub-c5eaf.firebaseapp.com",
@@ -42,7 +37,6 @@ const firebaseConfig = {
   measurementId: "G-DVJD1EX7HW"
 };
 
-// Initialize Firebase
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
@@ -183,8 +177,8 @@ export default function App() {
   const [dmList, setDmList] = useState([]);
   const [userProfile, setUserProfile] = useState({ displayName: 'Guest', color: 'bg-indigo-600', role: 'Reader' });
   const [isSaving, setIsSaving] = useState(false);
-const [showAuthModal, setShowAuthModal] = useState(false);
-  
+  const [showAuthModal, setShowAuthModal] = useState(false);
+
   const chatEndRef = useRef(null);
 
   useEffect(() => {
@@ -221,10 +215,10 @@ const [showAuthModal, setShowAuthModal] = useState(false);
     if (!user) return;
     let pathSegment = view === 'books' ? `books_${genre}` : view === 'writers' ? `writers_${genre}` : `langs_${selectedLang}`;
     if (!['books', 'writers', 'languages'].includes(view)) return;
-    
+
     const q = query(
-      collection(db, 'artifacts', appId, 'public', 'data', pathSegment), 
-      orderBy('createdAt', 'asc'), 
+      collection(db, 'artifacts', appId, 'public', 'data', pathSegment),
+      orderBy('createdAt', 'asc'),
       limit(50)
     );
 
@@ -247,7 +241,6 @@ const [showAuthModal, setShowAuthModal] = useState(false);
       return;
     }
     let pathSegment = view === 'books' ? `books_${genre}` : view === 'writers' ? `writers_${genre}` : `langs_${selectedLang}`;
-
     try {
       await addDoc(collection(db, 'artifacts', appId, 'public', 'data', pathSegment), {
         text: newMessage,
@@ -269,24 +262,24 @@ const [showAuthModal, setShowAuthModal] = useState(false);
     } catch (err) { console.error(err); } finally { setIsSaving(false); }
   };
 
-const handleSignOut = async () => {
+  const handleSignOut = async () => {
     await signOut(auth);
     await signInAnonymously(auth);
     navigateTo('home');
   };
 
-  const navigateTo = (v) => { 
-    setView(v); 
-    setIsMenuOpen(false); 
-    setIsDMOpen(false); 
+  const navigateTo = (v) => {
+    setView(v);
+    setIsMenuOpen(false);
+    setIsDMOpen(false);
     window.scrollTo(0, 0);
   };
 
-const isRegistered = user && !user.isAnonymous;
+  const isRegistered = user && !user.isAnonymous;
 
   return (
     <div className="min-h-screen bg-white text-slate-900 font-sans flex flex-col relative overflow-x-hidden">
-{showAuthModal && (
+      {showAuthModal && (
         <AuthModal
           onClose={() => setShowAuthModal(false)}
           onSuccess={() => setShowAuthModal(false)}
@@ -300,7 +293,7 @@ const isRegistered = user && !user.isAnonymous;
           <div className="text-2xl font-black italic tracking-tighter cursor-pointer select-none" onClick={() => navigateTo('home')}>HUB.</div>
         </div>
         <div className="flex items-center gap-4">
-{!isRegistered && (
+          {!isRegistered && (
             <button onClick={() => setShowAuthModal(true)} className="px-5 py-2 bg-indigo-600 text-white rounded-full font-black text-[10px] uppercase tracking-widest hover:bg-indigo-700 transition-all shadow-lg">
               Sign Up
             </button>
@@ -318,8 +311,8 @@ const isRegistered = user && !user.isAnonymous;
       <div className={`fixed inset-0 bg-slate-950/60 z-[1000] transition-opacity duration-500 ${isMenuOpen ? 'opacity-100 visible' : 'opacity-0 invisible pointer-events-none'}`} onClick={() => setIsMenuOpen(false)} />
       <aside className={`fixed top-0 left-0 bottom-0 w-80 bg-white z-[1100] shadow-2xl transition-transform duration-500 ${isMenuOpen ? 'translate-x-0' : '-translate-x-full'} flex flex-col`}>
         <div className="p-8 border-b flex justify-between items-center shrink-0">
-            <span className="font-black text-indigo-600 uppercase italic tracking-widest">Navigation</span>
-            <button onClick={() => setIsMenuOpen(false)} className="text-slate-300">✕</button>
+          <span className="font-black text-indigo-600 uppercase italic tracking-widest">Navigation</span>
+          <button onClick={() => setIsMenuOpen(false)} className="text-slate-300">✕</button>
         </div>
         <nav className="flex-1 overflow-y-auto p-6 space-y-2">
           {NAV_ITEMS.map(item => (
@@ -385,7 +378,7 @@ const isRegistered = user && !user.isAnonymous;
                   {(userProfile.displayName || 'U')[0]}
                 </div>
                 <div>
-<h2 className="text-4xl font-black italic tracking-tighter uppercase leading-none mb-2">My <span className="text-indigo-600">Profile</span></h2>
+                  <h2 className="text-4xl font-black italic tracking-tighter uppercase leading-none mb-2">My <span className="text-indigo-600">Profile</span></h2>
                   {isRegistered && <p className="text-xs text-slate-400 font-bold">{user.email}</p>}
                   {!isRegistered && (
                     <button onClick={() => setShowAuthModal(true)} className="text-[10px] font-black uppercase tracking-widest text-indigo-600 hover:underline">
@@ -394,7 +387,6 @@ const isRegistered = user && !user.isAnonymous;
                   )}
                 </div>
               </div>
-
               <div className="space-y-8">
                 <div>
                   <label className="block text-[10px] font-black uppercase text-slate-400 tracking-[0.2em] mb-4">Display Name</label>
@@ -418,16 +410,6 @@ const isRegistered = user && !user.isAnonymous;
                 </button>
               )}
             </div>
-          </div>
-        )}
-
-        {view === 'support' && (
-          <div className="flex-1 max-w-4xl mx-auto w-full py-24 px-6 text-center">
-            <div className="text-6xl mb-8">💎</div>
-            <h2 className="text-5xl font-black italic tracking-tighter mb-6 uppercase">Support the <span className="text-indigo-600">Creator</span></h2>
-            <a href="https://www.patreon.com" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-4 bg-[#FF424D] text-white px-12 py-6 rounded-[2.5rem] font-black text-lg uppercase tracking-widest shadow-2xl hover:scale-105 transition-all">Join on Patreon</a>
-          </div>
-        )}
           </div>
         )}
 
@@ -465,8 +447,6 @@ const isRegistered = user && !user.isAnonymous;
             </aside>
 
             <div className="flex-1 flex flex-col bg-white rounded-[4.5rem] border border-slate-100 shadow-2xl overflow-hidden min-h-[600px]">
-              
-              {/* WRITERS SUB-NAV RESTORED */}
               {view === 'writers' && (
                 <div className="bg-slate-900 text-white p-5 flex flex-wrap items-center justify-center gap-12 px-10 shrink-0 shadow-xl relative z-10">
                   <button className="text-[10px] font-black uppercase tracking-widest text-indigo-400 hover:text-white transition-colors flex items-center gap-2"><span>✍️</span> Give Advice?</button>
@@ -508,10 +488,8 @@ const isRegistered = user && !user.isAnonymous;
                     <button onClick={() => setShowAuthModal(true)} className="text-indigo-600 hover:underline">Sign up</button> to join the conversation
                   </p>
                 )}
-                <form onSubmit={handlePost}
-className="flex flex-row gap-2 max-w-5xl mx-auto w-full">
-                  <input value={newMessage} onChange={e => setNewMessage(e.target.value)} placeholder={isRegistered ? "Share thoughts..." : "Sign up to post..."}
-className="flex-1 min-w-0 bg-slate-50 rounded-[2.5rem] px-6 py-4 outline-none font-bold text-sm border-2 border-transparent focus:border-indigo-100 transition-all" />
+                <form onSubmit={handlePost} className="flex flex-row gap-2 max-w-5xl mx-auto w-full">
+                  <input value={newMessage} onChange={e => setNewMessage(e.target.value)} placeholder={isRegistered ? "Share thoughts..." : "Sign up to post..."} className="flex-1 min-w-0 bg-slate-50 rounded-[2.5rem] px-6 py-4 outline-none font-bold text-sm border-2 border-transparent focus:border-indigo-100 transition-all" />
                   <button type="submit" className="bg-slate-900 text-white px-6 py-4 rounded-[2.5rem] font-black text-[10px] uppercase tracking-widest shadow-2xl active:scale-95 hover:bg-indigo-600 transition-all shrink-0">
                     Send 🚀
                   </button>
