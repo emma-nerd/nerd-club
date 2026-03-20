@@ -412,7 +412,6 @@ const isRegistered = user && !user.isAnonymous;
               <button onClick={saveProfile} disabled={isSaving} className="w-full bg-indigo-600 text-white py-6 rounded-[2.5rem] font-black text-sm uppercase tracking-[0.2em] shadow-2xl hover:bg-indigo-700 transition-all disabled:opacity-50">
                 {isSaving ? 'Updating...' : 'Save Changes'}
               </button>
-</div>
               {isRegistered && (
                 <button onClick={handleSignOut} className="w-full border-2 border-slate-100 text-slate-400 py-4 rounded-[2.5rem] font-black text-xs uppercase tracking-widest hover:border-rose-200 hover:text-rose-400 transition-all">
                   Sign Out
@@ -421,9 +420,6 @@ const isRegistered = user && !user.isAnonymous;
             </div>
           </div>
         )}
-
-        {view === 'support' &&
-            )}
 
         {view === 'support' && (
           <div className="flex-1 max-w-4xl mx-auto w-full py-24 px-6 text-center">
