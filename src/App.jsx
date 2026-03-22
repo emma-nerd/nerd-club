@@ -869,21 +869,3 @@ export default function App() {
     </div>
   );
 }
-```
-
----
-
-Here's what to do before uploading:
-
-1. Replace the 6 `YOUR_...` Firebase config values as usual
-2. Replace `YOUR_ADMIN_EMAIL` with your actual email address
-3. In Firebase console → Firestore → go to **Rules** and replace the existing rules with:
-```
-rules_version = '2';
-service cloud.firestore {
-  match /databases/{database}/documents {
-    match /{document=**} {
-      allow read, write: if true;
-    }
-  }
-}
