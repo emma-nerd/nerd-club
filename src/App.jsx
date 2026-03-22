@@ -20,12 +20,10 @@ import {
   getDoc,
   setDoc,
   addDoc,
-  updateDoc,
   onSnapshot,
   query,
   orderBy,
   limit,
-  where,
   serverTimestamp
 } from 'firebase/firestore';
 
@@ -44,7 +42,6 @@ const auth = getAuth(app);
 const db = getFirestore(app);
 const appId = 'the-hub-community';
 const googleProvider = new GoogleAuthProvider();
-const ADMIN_EMAIL = import.meta.env.VITE_ADMIN_EMAIL;
 
 const GENRES = [
   { id: 'fantasy', name: 'Fantasy', icon: '⚔️' },
@@ -52,15 +49,6 @@ const GENRES = [
   { id: 'mystery', name: 'Mystery', icon: '🕵️' },
   { id: 'romance', name: 'Romance', icon: '💖' },
   { id: 'nonfiction', name: 'Non-Fiction', icon: '🧠' }
-];
-
-const ADVICE_CATEGORIES = [
-  { id: 'general', name: 'General Writing Advice' },
-  { id: 'fantasy', name: 'Fantasy' },
-  { id: 'scifi', name: 'Sci-Fi' },
-  { id: 'mystery', name: 'Mystery' },
-  { id: 'romance', name: 'Romance' },
-  { id: 'nonfiction', name: 'Non-Fiction' }
 ];
 
 const LANGUAGES = [
@@ -177,330 +165,6 @@ function AuthModal({ onClose, onSuccess }) {
   );
 }
 
-// Give Advice Submission Form
-function GiveAdvicePage({ user, isRegistered, onShowAuth }) {
-  const [form, setForm] = useState({ name: '', email: '', categories: [], header: '', body: '' });
-  const [fileContent, setFileContent] = useState('');
-  const [fileName, setFileName] = useState('');
-  const [submitting, setSubmitting] = useState(false);
-  const [submitted, setSubmitted] = useState(false);
-  const [error, setError] = useState('');
-
-  const toggleCategory = (id) => {
-    setForm(f => ({
-      ...f,
-      categories: f.categories.includes(id)
-        ? f.categories.filter(c => c !== id)
-        : [...f.categories, id]
-    }));
-  };
-
-  const handleFile = (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    setFileName(file.name);
-    const reader = new FileReader();
-    reader.onload = (ev) => setFileContent(ev.target.result);
-    reader.readAsText(file);
-  };
-
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    if (!isRegistered) { onShowAuth(); return; }
-    if (!form.name || !form.email || !form.header || (!form.body && !fileContent)) {
-      setError('Please fill in all required fields.');
-      return;
-    }
-    if (form.categories.length === 0) {
-      setError('Please select at least one category.');
-      return;
-    }
-    setSubmitting(true);
-    setError('');
-    try {
-      await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'submissions'), {
-        name: form.name,
-        email: form.email,
-        categories: form.categories,
-        header: form.header,
-        body: form.body || fileContent,
-        fileName: fileName || '',
-        status: 'pending',
-        submittedBy: user.uid,
-        createdAt: serverTimestamp()
-      });
-      setSubmitted(true);
-    } catch (err) {
-      setError('Something went wrong. Please try again.');
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  if (submitted) return (
-    <div className="flex-1 flex flex-col items-center justify-center py-24 px-6 text-center">
-      <div className="text-6xl mb-6">🎉</div>
-      <h2 className="text-4xl font-black italic tracking-tighter uppercase mb-4">Article <span className="text-indigo-600">Submitted!</span></h2>
-      <p className="text-slate-400 font-medium max-w-md">Your article is under review. Once approved it will appear in the Articles Feed. Thank you for contributing!</p>
-    </div>
-  );
-
-  return (
-    <div className="flex-1 max-w-3xl mx-auto w-full py-16 px-6">
-      <div className="mb-12 text-center">
-        <div className="inline-block px-4 py-1.5 bg-indigo-50 rounded-full text-indigo-600 font-black text-[10px] uppercase tracking-[0.3em] mb-4">Writers Hub</div>
-        <h2 className="text-5xl font-black italic tracking-tighter uppercase mb-4">Give <span className="text-indigo-600">Advice</span></h2>
-        <p className="text-slate-400 font-medium">Share your writing wisdom with the community.</p>
-        {!isRegistered && <p className="mt-4 text-[11px] font-black uppercase tracking-widest text-rose-400">You must be signed in to submit an article.</p>}
-      </div>
-
-      <div className="bg-white rounded-[4rem] shadow-2xl border border-slate-100 p-8 md:p-12 space-y-8">
-        {error && <p className="text-rose-500 text-xs font-black uppercase tracking-widest bg-rose-50 px-4 py-3 rounded-2xl">{error}</p>}
-
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          <div>
-            <label className="block text-[10px] font-black uppercase text-slate-400 tracking-[0.2em] mb-3">Your Name *</label>
-            <input type="text" value={form.name} onChange={e => setForm({...form, name: e.target.value})} className="w-full bg-slate-50 rounded-[2rem] px-6 py-4 outline-none font-bold text-sm border-2 border-transparent focus:border-indigo-100 transition-all" placeholder="Full name" />
-          </div>
-          <div>
-            <label className="block text-[10px] font-black uppercase text-slate-400 tracking-[0.2em] mb-3">Email Address *</label>
-            <input type="email" value={form.email} onChange={e => setForm({...form, email: e.target.value})} className="w-full bg-slate-50 rounded-[2rem] px-6 py-4 outline-none font-bold text-sm border-2 border-transparent focus:border-indigo-100 transition-all" placeholder="your@email.com" />
-          </div>
-        </div>
-
-        <div>
-          <label className="block text-[10px] font-black uppercase text-slate-400 tracking-[0.2em] mb-3">Categories * <span className="text-slate-300">(select all that apply)</span></label>
-          <div className="flex flex-wrap gap-3">
-            {ADVICE_CATEGORIES.map(cat => (
-              <button key={cat.id} type="button" onClick={() => toggleCategory(cat.id)} className={`px-5 py-2.5 rounded-[2rem] font-black text-[11px] uppercase transition-all border-2 ${form.categories.includes(cat.id) ? 'bg-indigo-600 text-white border-indigo-600 shadow-lg' : 'border-slate-100 text-slate-500 hover:bg-slate-50'}`}>
-                {cat.name}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <div>
-          <label className="block text-[10px] font-black uppercase text-slate-400 tracking-[0.2em] mb-3">Article Title *</label>
-          <input type="text" value={form.header} onChange={e => setForm({...form, header: e.target.value})} className="w-full bg-slate-50 rounded-[2rem] px-6 py-4 outline-none font-bold text-sm border-2 border-transparent focus:border-indigo-100 transition-all" placeholder="Enter your article title" />
-        </div>
-
-        <div>
-          <label className="block text-[10px] font-black uppercase text-slate-400 tracking-[0.2em] mb-3">Article Content *</label>
-          <textarea value={form.body} onChange={e => setForm({...form, body: e.target.value})} rows={10} className="w-full bg-slate-50 rounded-[2rem] px-6 py-4 outline-none font-medium text-sm border-2 border-transparent focus:border-indigo-100 transition-all resize-none leading-relaxed" placeholder="Paste your article here..." />
-        </div>
-
-        <div>
-          <label className="block text-[10px] font-black uppercase text-slate-400 tracking-[0.2em] mb-3">Or Upload a File <span className="text-slate-300">(PDF or DOCX)</span></label>
-          <label className="flex items-center gap-4 bg-slate-50 rounded-[2rem] px-6 py-4 cursor-pointer border-2 border-dashed border-slate-200 hover:border-indigo-200 transition-all">
-            <span className="text-2xl">📎</span>
-            <span className="font-bold text-sm text-slate-400">{fileName || 'Click to upload a file...'}</span>
-            <input type="file" accept=".pdf,.docx,.txt" onChange={handleFile} className="hidden" />
-          </label>
-        </div>
-
-        <button onClick={handleSubmit} disabled={submitting} className="w-full bg-indigo-600 text-white py-6 rounded-[2.5rem] font-black text-sm uppercase tracking-[0.2em] shadow-2xl hover:bg-indigo-700 transition-all disabled:opacity-50">
-          {submitting ? 'Submitting...' : isRegistered ? 'Submit Article ✍️' : 'Sign In to Submit'}
-        </button>
-      </div>
-    </div>
-  );
-}
-
-// Articles Feed / Blog
-function ArticlesFeedPage() {
-  const [articles, setArticles] = useState([]);
-  const [selectedFilters, setSelectedFilters] = useState([]);
-  const [expandedArticle, setExpandedArticle] = useState(null);
-
-  useEffect(() => {
-    const q = query(
-      collection(db, 'artifacts', appId, 'public', 'data', 'submissions'),
-      where('status', '==', 'approved'),
-      orderBy('createdAt', 'desc')
-    );
-    const unsub = onSnapshot(q, (s) => {
-      setArticles(s.docs.map(d => ({ id: d.id, ...d.data() })));
-    });
-    return () => unsub();
-  }, []);
-
-  const toggleFilter = (id) => {
-    setSelectedFilters(f => f.includes(id) ? f.filter(x => x !== id) : [...f, id]);
-  };
-
-  const filtered = selectedFilters.length === 0
-    ? articles
-    : articles.filter(a => a.categories?.some(c => selectedFilters.includes(c)));
-
-  if (expandedArticle) return (
-    <div className="flex-1 max-w-3xl mx-auto w-full py-16 px-6">
-      <button onClick={() => setExpandedArticle(null)} className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-slate-400 hover:text-indigo-600 transition-colors mb-10">
-        ← Back to Articles
-      </button>
-      <div className="bg-white rounded-[4rem] shadow-2xl border border-slate-100 p-8 md:p-16">
-        <div className="flex flex-wrap gap-2 mb-6">
-          {expandedArticle.categories?.map(c => (
-            <span key={c} className="px-4 py-1.5 bg-indigo-50 text-indigo-600 rounded-full font-black text-[10px] uppercase tracking-widest">
-              {ADVICE_CATEGORIES.find(x => x.id === c)?.name || c}
-            </span>
-          ))}
-        </div>
-        <h1 className="text-4xl font-black italic tracking-tighter uppercase mb-4">{expandedArticle.header}</h1>
-        <p className="text-[11px] font-black uppercase tracking-widest text-slate-400 mb-10">By {expandedArticle.name}</p>
-        <div className="text-slate-600 font-medium leading-relaxed text-lg whitespace-pre-wrap">{expandedArticle.body}</div>
-      </div>
-    </div>
-  );
-
-  return (
-    <div className="flex-1 max-w-5xl mx-auto w-full py-16 px-6">
-      <div className="mb-12 text-center">
-        <div className="inline-block px-4 py-1.5 bg-indigo-50 rounded-full text-indigo-600 font-black text-[10px] uppercase tracking-[0.3em] mb-4">Writers Hub</div>
-        <h2 className="text-5xl font-black italic tracking-tighter uppercase mb-4">Articles <span className="text-indigo-600">Feed</span></h2>
-        <p className="text-slate-400 font-medium">Writing advice from the community.</p>
-      </div>
-
-      <div className="mb-10">
-        <p className="text-[10px] font-black uppercase text-slate-400 tracking-[0.2em] mb-4">Filter by category</p>
-        <div className="flex flex-wrap gap-3">
-          {ADVICE_CATEGORIES.map(cat => (
-            <button key={cat.id} onClick={() => toggleFilter(cat.id)} className={`px-5 py-2.5 rounded-[2rem] font-black text-[11px] uppercase transition-all border-2 ${selectedFilters.includes(cat.id) ? 'bg-indigo-600 text-white border-indigo-600 shadow-lg' : 'border-slate-100 text-slate-500 hover:bg-slate-50'}`}>
-              {cat.name}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {filtered.length === 0 ? (
-        <div className="text-center py-24 text-slate-300 font-black text-xs uppercase tracking-widest">No articles yet. Be the first to contribute!</div>
-      ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          {filtered.map(article => (
-            <div key={article.id} onClick={() => setExpandedArticle(article)} className="bg-white rounded-[3rem] border border-slate-100 shadow-sm hover:shadow-2xl hover:-translate-y-2 transition-all cursor-pointer p-8">
-              <div className="flex flex-wrap gap-2 mb-4">
-                {article.categories?.map(c => (
-                  <span key={c} className="px-3 py-1 bg-indigo-50 text-indigo-600 rounded-full font-black text-[9px] uppercase tracking-widest">
-                    {ADVICE_CATEGORIES.find(x => x.id === c)?.name || c}
-                  </span>
-                ))}
-              </div>
-              <h3 className="font-black text-lg uppercase tracking-tighter mb-3 leading-tight">{article.header}</h3>
-              <p className="text-slate-400 text-sm font-medium leading-relaxed line-clamp-3">{article.body?.slice(0, 150)}...</p>
-              <p className="text-[10px] font-black uppercase tracking-widest text-slate-300 mt-4">By {article.name}</p>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// Admin Page
-function AdminPage({ user, isAdmin }) {
-  const [submissions, setSubmissions] = useState([]);
-  const [filter, setFilter] = useState('pending');
-  const [expandedId, setExpandedId] = useState(null);
-
-  useEffect(() => {
-    if (!isAdmin) return;
-    const q = query(
-      collection(db, 'artifacts', appId, 'public', 'data', 'submissions'),
-      where('status', '==', filter),
-      orderBy('createdAt', 'desc')
-    );
-    const unsub = onSnapshot(q, (s) => {
-      setSubmissions(s.docs.map(d => ({ id: d.id, ...d.data() })));
-    });
-    return () => unsub();
-  }, [isAdmin, filter]);
-
-  const updateStatus = async (id, status) => {
-    await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'submissions', id), { status });
-  };
-
-  if (!isAdmin) return (
-    <div className="flex-1 flex items-center justify-center py-24 px-6 text-center">
-      <div>
-        <div className="text-6xl mb-6">🔒</div>
-        <h2 className="text-4xl font-black italic tracking-tighter uppercase mb-4">Access <span className="text-rose-500">Denied</span></h2>
-        <p className="text-slate-400 font-medium">You don't have permission to view this page.</p>
-      </div>
-    </div>
-  );
-
-  return (
-    <div className="flex-1 max-w-4xl mx-auto w-full py-16 px-6">
-      <div className="mb-12">
-        <div className="inline-block px-4 py-1.5 bg-rose-50 rounded-full text-rose-500 font-black text-[10px] uppercase tracking-[0.3em] mb-4">Admin Only</div>
-        <h2 className="text-5xl font-black italic tracking-tighter uppercase mb-4">Article <span className="text-indigo-600">Review</span></h2>
-        <p className="text-slate-400 font-medium">Review and approve submitted articles.</p>
-      </div>
-
-      <div className="flex gap-3 mb-10">
-        {['pending', 'approved', 'rejected'].map(s => (
-          <button key={s} onClick={() => setFilter(s)} className={`px-6 py-3 rounded-[2rem] font-black text-[11px] uppercase transition-all border-2 ${filter === s ? 'bg-indigo-600 text-white border-indigo-600 shadow-lg' : 'border-slate-100 text-slate-500 hover:bg-slate-50'}`}>
-            {s}
-          </button>
-        ))}
-      </div>
-
-      {submissions.length === 0 ? (
-        <div className="text-center py-24 text-slate-300 font-black text-xs uppercase tracking-widest">No {filter} submissions.</div>
-      ) : (
-        <div className="space-y-6">
-          {submissions.map(sub => (
-            <div key={sub.id} className="bg-white rounded-[3rem] border border-slate-100 shadow-sm p-8">
-              <div className="flex items-start justify-between gap-4 mb-4">
-                <div>
-                  <h3 className="font-black text-lg uppercase tracking-tighter mb-1">{sub.header}</h3>
-                  <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">By {sub.name} · {sub.email}</p>
-                  <div className="flex flex-wrap gap-2 mt-2">
-                    {sub.categories?.map(c => (
-                      <span key={c} className="px-3 py-1 bg-indigo-50 text-indigo-600 rounded-full font-black text-[9px] uppercase tracking-widest">
-                        {ADVICE_CATEGORIES.find(x => x.id === c)?.name || c}
-                      </span>
-                    ))}
-                  </div>
-                </div>
-                <button onClick={() => setExpandedId(expandedId === sub.id ? null : sub.id)} className="text-[10px] font-black uppercase tracking-widest text-indigo-600 shrink-0">
-                  {expandedId === sub.id ? 'Hide ▲' : 'Read ▼'}
-                </button>
-              </div>
-
-              {expandedId === sub.id && (
-                <div className="bg-slate-50 rounded-[2rem] p-6 mb-6 text-sm text-slate-600 font-medium leading-relaxed whitespace-pre-wrap max-h-64 overflow-y-auto">
-                  {sub.body}
-                </div>
-              )}
-
-              {filter === 'pending' && (
-                <div className="flex gap-3">
-                  <button onClick={() => updateStatus(sub.id, 'approved')} className="flex-1 bg-emerald-500 text-white py-3 rounded-[2rem] font-black text-[11px] uppercase tracking-widest hover:bg-emerald-600 transition-all shadow-lg">
-                    ✅ Approve
-                  </button>
-                  <button onClick={() => updateStatus(sub.id, 'rejected')} className="flex-1 bg-rose-500 text-white py-3 rounded-[2rem] font-black text-[11px] uppercase tracking-widest hover:bg-rose-600 transition-all shadow-lg">
-                    ❌ Reject
-                  </button>
-                </div>
-              )}
-              {filter === 'approved' && (
-                <button onClick={() => updateStatus(sub.id, 'rejected')} className="w-full border-2 border-rose-200 text-rose-400 py-3 rounded-[2rem] font-black text-[11px] uppercase tracking-widest hover:bg-rose-50 transition-all">
-                  Revoke Approval
-                </button>
-              )}
-              {filter === 'rejected' && (
-                <button onClick={() => updateStatus(sub.id, 'approved')} className="w-full border-2 border-emerald-200 text-emerald-500 py-3 rounded-[2rem] font-black text-[11px] uppercase tracking-widest hover:bg-emerald-50 transition-all">
-                  Approve After All
-                </button>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
 export default function App() {
   const [user, setUser] = useState(null);
   const [view, setView] = useState('home');
@@ -612,7 +276,6 @@ export default function App() {
   };
 
   const isRegistered = user && !user.isAnonymous;
-  const isAdmin = user?.email === ADMIN_EMAIL;
 
   return (
     <div className="min-h-screen bg-white text-slate-900 font-sans flex flex-col relative overflow-x-hidden">
@@ -622,13 +285,14 @@ export default function App() {
           onSuccess={() => setShowAuthModal(false)}
         />
       )}
-
       <header className="h-20 bg-white border-b border-slate-100 px-6 md:px-12 flex items-center justify-between sticky top-0 z-[500] backdrop-blur-md bg-white/90">
         <div className="flex items-center gap-6">
           <button onClick={() => setIsMenuOpen(true)} className="p-3 hover:bg-slate-50 rounded-2xl transition-all active:scale-90">
             <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M4 6h16M4 12h8m-8 6h16" /></svg>
           </button>
-          <div className="text-2xl font-black italic tracking-tighter cursor-pointer select-none" onClick={() => navigateTo('home')}>HUB.</div>
+          {isRegistered && (
+            <div className="text-2xl font-black italic tracking-tighter cursor-pointer select-none" onClick={() => navigateTo('home')}>HUB.</div>
+          )}
         </div>
         <div className="flex items-center gap-4">
           {!isRegistered && (
@@ -659,12 +323,6 @@ export default function App() {
               <span>{item.label}</span>
             </button>
           ))}
-          {isAdmin && (
-            <button onClick={() => navigateTo('admin')} className={`w-full text-left p-4 rounded-2xl font-black text-[12px] uppercase flex items-center gap-4 transition-all ${view === 'admin' ? 'bg-rose-500 text-white shadow-xl' : 'hover:bg-rose-50 text-rose-400'}`}>
-              <span className="text-xl">🔒</span>
-              <span>Admin</span>
-            </button>
-          )}
         </nav>
       </aside>
 
@@ -774,19 +432,7 @@ export default function App() {
           </div>
         )}
 
-        {view === 'give-advice' && (
-          <GiveAdvicePage user={user} isRegistered={isRegistered} onShowAuth={() => setShowAuthModal(true)} />
-        )}
-
-        {view === 'articles-feed' && (
-          <ArticlesFeedPage />
-        )}
-
-        {view === 'admin' && (
-          <AdminPage user={user} isAdmin={isAdmin} />
-        )}
-
-        {!['home', 'support', 'about', 'profile', 'give-advice', 'articles-feed', 'admin'].includes(view) && (
+        {!['home', 'support', 'about', 'profile'].includes(view) && (
           <div className="max-w-7xl mx-auto w-full p-4 md:p-8 flex flex-col md:flex-row gap-8 flex-1">
             <aside className="w-full md:w-72 shrink-0">
               <div className="bg-white border rounded-[3.5rem] p-8 shadow-sm md:sticky md:top-28">
@@ -805,8 +451,8 @@ export default function App() {
             <div className="flex-1 flex flex-col bg-white rounded-[4.5rem] border border-slate-100 shadow-2xl overflow-hidden min-h-[600px]">
               {view === 'writers' && (
                 <div className="bg-slate-900 text-white p-5 flex flex-wrap items-center justify-center gap-12 px-10 shrink-0 shadow-xl relative z-10">
-                  <button onClick={() => navigateTo('give-advice')} className="text-[10px] font-black uppercase tracking-widest text-indigo-400 hover:text-white transition-colors flex items-center gap-2"><span>✍️</span> Give Advice?</button>
-                  <button onClick={() => navigateTo('articles-feed')} className="text-[10px] font-black uppercase tracking-widest hover:text-indigo-400 transition-colors flex items-center gap-2"><span>📄</span> Articles Feed</button>
+                  <button className="text-[10px] font-black uppercase tracking-widest text-indigo-400 hover:text-white transition-colors flex items-center gap-2"><span>✍️</span> Give Advice?</button>
+                  <button className="text-[10px] font-black uppercase tracking-widest hover:text-indigo-400 transition-colors flex items-center gap-2"><span>📄</span> Articles Feed</button>
                   <button className="text-[10px] font-black uppercase tracking-widest text-rose-400 hover:text-white transition-colors italic flex items-center gap-2"><span>🔎</span> Proofreading</button>
                 </div>
               )}
