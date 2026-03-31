@@ -11,13 +11,15 @@ import {
   linkWithCredential,
   linkWithPopup,
   EmailAuthProvider,
-  signOut
+  signOut,
+  sendEmailVerification
 } from 'firebase/auth';
 import {
   getFirestore,
   collection,
   doc,
   getDoc,
+  getDocs,
   setDoc,
   addDoc,
   updateDoc,
@@ -26,7 +28,8 @@ import {
   orderBy,
   limit,
   where,
-  serverTimestamp
+  serverTimestamp,
+  arrayUnion
 } from 'firebase/firestore';
 
 const firebaseConfig = {
@@ -87,6 +90,65 @@ const PROFILE_COLORS = [
   'bg-indigo-600', 'bg-rose-500', 'bg-emerald-500', 'bg-amber-500', 'bg-violet-600', 'bg-sky-500'
 ];
 
+const todayStr = () => new Date().toISOString().slice(0, 10);
+
+const getHubKey = (view, genre, selectedLang) => {
+  if (view === 'books') return `books_${genre}`;
+  if (view === 'writers') return `writers_${genre}`;
+  if (view === 'languages') return `langs_${selectedLang}`;
+  return null;
+};
+
+const trackActivity = async (userId, hubKey) => {
+  if (!userId || !hubKey) return;
+  const activityRef = doc(db, 'artifacts', appId, 'users', userId, 'activity', hubKey);
+  const snap = await getDoc(activityRef);
+  const today = todayStr();
+  if (snap.exists()) {
+    const days = snap.data().days || [];
+    if (!days.includes(today)) {
+      await updateDoc(activityRef, { days: arrayUnion(today) });
+    }
+  } else {
+    await setDoc(activityRef, { days: [today] });
+  }
+};
+
+const checkCanMessage = async (myUid, theirUid) => {
+  const hubs = [
+    ...GENRES.map(g => `books_${g.id}`),
+    ...GENRES.map(g => `writers_${g.id}`),
+    ...LANGUAGES.map(l => `langs_${l.id}`)
+  ];
+  for (const hub of hubs) {
+    const myRef = doc(db, 'artifacts', appId, 'users', myUid, 'activity', hub);
+    const theirRef = doc(db, 'artifacts', appId, 'users', theirUid, 'activity', hub);
+    const [mySnap, theirSnap] = await Promise.all([getDoc(myRef), getDoc(theirRef)]);
+    if (mySnap.exists() && theirSnap.exists()) {
+      const myDays = new Set(mySnap.data().days || []);
+      const theirDays = new Set(theirSnap.data().days || []);
+      const shared = [...myDays].filter(d => theirDays.has(d));
+      if (shared.length >= 5) return true;
+    }
+  }
+  return false;
+};
+
+const getOrCreateDM = async (myUid, theirUid) => {
+  const ids = [myUid, theirUid].sort();
+  const dmId = ids.join('_');
+  const dmRef = doc(db, 'artifacts', appId, 'dms', dmId);
+  const snap = await getDoc(dmRef);
+  if (!snap.exists()) {
+    await setDoc(dmRef, {
+      participants: ids,
+      createdAt: serverTimestamp(),
+      type: 'dm'
+    });
+  }
+  return dmId;
+};
+
 function AuthModal({ onClose, onSuccess }) {
   const [mode, setMode] = useState('login');
   const [email, setEmail] = useState('');
@@ -101,11 +163,13 @@ function AuthModal({ onClose, onSuccess }) {
       const currentUser = auth.currentUser;
       const credential = EmailAuthProvider.credential(email, password);
       if (mode === 'signup') {
+        let userCredential;
         if (currentUser?.isAnonymous) {
-          await linkWithCredential(currentUser, credential);
+          userCredential = await linkWithCredential(currentUser, credential);
         } else {
-          await createUserWithEmailAndPassword(auth, email, password);
+          userCredential = await createUserWithEmailAndPassword(auth, email, password);
         }
+        await sendEmailVerification(userCredential.user);
       } else {
         await signInWithEmailAndPassword(auth, email, password);
       }
@@ -149,6 +213,11 @@ function AuthModal({ onClose, onSuccess }) {
           </h2>
           <button onClick={onClose} className="text-slate-300 hover:text-slate-500 text-xl">✕</button>
         </div>
+        {mode === 'signup' && (
+          <p className="text-[10px] font-black uppercase tracking-widest text-indigo-600 bg-indigo-50 px-4 py-3 rounded-2xl mb-6">
+            A verification email will be sent after sign up. You'll need to verify your email to send private messages.
+          </p>
+        )}
         {error && <p className="text-rose-500 text-xs font-black uppercase tracking-widest mb-6 bg-rose-50 px-4 py-3 rounded-2xl">{error}</p>}
         <button onClick={handleGoogle} disabled={loading} className="w-full flex items-center justify-center gap-4 border-2 border-slate-100 py-4 rounded-[2rem] font-black text-xs uppercase tracking-widest mb-6 hover:bg-slate-50 transition-all disabled:opacity-50">
           <svg className="w-5 h-5" viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
@@ -177,7 +246,290 @@ function AuthModal({ onClose, onSuccess }) {
   );
 }
 
-// Give Advice Submission Form
+function ProfilePopup({ profile, theirUid, myUid, isEmailVerified, isRegistered, onClose, onMessageClick }) {
+  const [canMessage, setCanMessage] = useState(false);
+  const [checking, setChecking] = useState(true);
+
+  useEffect(() => {
+    if (!myUid || !theirUid || !isRegistered || !isEmailVerified) {
+      setChecking(false);
+      return;
+    }
+    checkCanMessage(myUid, theirUid).then(result => {
+      setCanMessage(result);
+      setChecking(false);
+    });
+  }, [myUid, theirUid, isRegistered, isEmailVerified]);
+
+  const getMessageBlockedReason = () => {
+    if (!isRegistered) return 'Sign up to send private messages';
+    if (!isEmailVerified) return 'Verify your email to send private messages';
+    if (!canMessage) return 'Chat together in the same hub for 5 days to unlock private messages';
+    return null;
+  };
+
+  const blockedReason = getMessageBlockedReason();
+
+  return (
+    <div className="fixed inset-0 bg-slate-950/60 z-[3000] flex items-center justify-center p-6" onClick={onClose}>
+      <div className="bg-white rounded-[3rem] p-8 w-full max-w-sm shadow-2xl" onClick={e => e.stopPropagation()}>
+        <div className="flex justify-end mb-4">
+          <button onClick={onClose} className="text-slate-300 hover:text-slate-500">✕</button>
+        </div>
+        <div className="flex flex-col items-center text-center gap-4">
+          <div className={`w-20 h-20 rounded-full ${profile.color || 'bg-indigo-600'} flex items-center justify-center text-white text-3xl font-black shadow-xl`}>
+            {(profile.displayName || 'U')[0]}
+          </div>
+          <div>
+            <h3 className="font-black text-xl uppercase tracking-tighter">{profile.displayName}</h3>
+            {profile.role && <p className="text-[10px] font-black uppercase tracking-widest text-indigo-600 mt-1">{profile.role}</p>}
+          </div>
+          {profile.description && (
+            <p className="text-slate-500 text-sm font-medium leading-relaxed bg-slate-50 rounded-2xl px-4 py-3 w-full text-left">
+              {profile.description}
+            </p>
+          )}
+          {myUid !== theirUid && (
+            <div className="w-full mt-2">
+              {checking ? (
+                <div className="text-[10px] font-black uppercase tracking-widest text-slate-300 py-3">Checking...</div>
+              ) : blockedReason ? (
+                <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 bg-slate-50 rounded-2xl px-4 py-3">{blockedReason}</div>
+              ) : (
+                <button onClick={() => { onMessageClick(theirUid, profile); onClose(); }} className="w-full bg-indigo-600 text-white py-4 rounded-[2rem] font-black text-xs uppercase tracking-widest shadow-xl hover:bg-indigo-700 transition-all">
+                  💬 Send Private Message
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MessagesPage({ user, userProfile, isEmailVerified, onShowAuth }) {
+  const [conversations, setConversations] = useState([]);
+  const [activeConv, setActiveConv] = useState(null);
+  const [messages, setMessages] = useState([]);
+  const [newMessage, setNewMessage] = useState('');
+  const [showCreateGroup, setShowCreateGroup] = useState(false);
+  const [groupName, setGroupName] = useState('');
+  const [searchUid, setSearchUid] = useState('');
+  const [groupMembers, setGroupMembers] = useState([]);
+  const [creating, setCreating] = useState(false);
+  const chatEndRef = useRef(null);
+
+  useEffect(() => {
+    if (!user || user.isAnonymous) return;
+    const q = query(
+      collection(db, 'artifacts', appId, 'dms'),
+      where('participants', 'array-contains', user.uid)
+    );
+    const unsub = onSnapshot(q, async (snap) => {
+      const convs = await Promise.all(snap.docs.map(async d => {
+        const data = { id: d.id, ...d.data() };
+        if (data.type === 'dm') {
+          const otherId = data.participants.find(p => p !== user.uid);
+          const profileRef = doc(db, 'artifacts', appId, 'users', otherId, 'settings', 'profile');
+          const profileSnap = await getDoc(profileRef);
+          data.otherProfile = profileSnap.exists() ? profileSnap.data() : { displayName: 'User' };
+          data.otherUid = otherId;
+        }
+        return data;
+      }));
+      setConversations(convs);
+    });
+    return () => unsub();
+  }, [user]);
+
+  useEffect(() => {
+    if (!activeConv) return;
+    const q = query(
+      collection(db, 'artifacts', appId, 'dms', activeConv.id, 'messages'),
+      orderBy('createdAt', 'asc'),
+      limit(100)
+    );
+    const unsub = onSnapshot(q, snap => {
+      setMessages(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    });
+    return () => unsub();
+  }, [activeConv]);
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
+
+  const sendMessage = async (e) => {
+    e.preventDefault();
+    if (!newMessage.trim() || !activeConv) return;
+    await addDoc(collection(db, 'artifacts', appId, 'dms', activeConv.id, 'messages'), {
+      text: newMessage,
+      userId: user.uid,
+      userName: userProfile.displayName || 'User',
+      userColor: userProfile.color || 'bg-indigo-600',
+      createdAt: serverTimestamp()
+    });
+    setNewMessage('');
+  };
+
+  const createGroup = async () => {
+    if (!groupName.trim() || groupMembers.length < 1) return;
+    setCreating(true);
+    try {
+      const allMembers = [user.uid, ...groupMembers.map(m => m.uid)];
+      if (allMembers.length > 10) { alert('Maximum 10 members allowed.'); return; }
+      await addDoc(collection(db, 'artifacts', appId, 'dms'), {
+        participants: allMembers,
+        groupName,
+        type: 'group',
+        createdBy: user.uid,
+        createdAt: serverTimestamp()
+      });
+      setShowCreateGroup(false);
+      setGroupName('');
+      setGroupMembers([]);
+    } catch (err) { console.error(err); }
+    finally { setCreating(false); }
+  };
+
+  const addMemberByUid = async () => {
+    if (!searchUid.trim()) return;
+    if (groupMembers.find(m => m.uid === searchUid)) return;
+    if (groupMembers.length >= 9) { alert('Maximum 9 additional members (10 total including you).'); return; }
+    const profileRef = doc(db, 'artifacts', appId, 'users', searchUid, 'settings', 'profile');
+    const snap = await getDoc(profileRef);
+    if (snap.exists()) {
+      setGroupMembers(prev => [...prev, { uid: searchUid, ...snap.data() }]);
+      setSearchUid('');
+    } else {
+      alert('User not found. Make sure you have the correct user ID.');
+    }
+  };
+
+  if (!user || user.isAnonymous) return (
+    <div className="flex-1 flex flex-col items-center justify-center py-24 px-6 text-center">
+      <div className="text-6xl mb-6">💬</div>
+      <h2 className="text-4xl font-black italic tracking-tighter uppercase mb-4">Private <span className="text-indigo-600">Messages</span></h2>
+      <p className="text-slate-400 font-medium mb-6">Sign up to send and receive private messages.</p>
+      <button onClick={onShowAuth} className="bg-indigo-600 text-white px-8 py-4 rounded-[2rem] font-black text-xs uppercase tracking-widest shadow-xl hover:bg-indigo-700 transition-all">Sign Up</button>
+    </div>
+  );
+
+  if (activeConv) return (
+    <div className="flex-1 flex flex-col max-w-3xl mx-auto w-full">
+      <div className="p-6 border-b flex items-center gap-4 bg-white sticky top-20 z-10">
+        <button onClick={() => { setActiveConv(null); setMessages([]); }} className="text-[10px] font-black uppercase tracking-widest text-slate-400 hover:text-indigo-600 transition-colors">← Back</button>
+        <div className="flex items-center gap-3">
+          {activeConv.type === 'dm' ? (
+            <>
+              <div className={`w-10 h-10 rounded-full ${activeConv.otherProfile?.color || 'bg-indigo-600'} flex items-center justify-center text-white font-black text-xs`}>
+                {(activeConv.otherProfile?.displayName || 'U')[0]}
+              </div>
+              <span className="font-black text-sm uppercase tracking-tight">{activeConv.otherProfile?.displayName}</span>
+            </>
+          ) : (
+            <>
+              <div className="w-10 h-10 rounded-full bg-indigo-600 flex items-center justify-center text-white font-black text-xs">👥</div>
+              <span className="font-black text-sm uppercase tracking-tight">{activeConv.groupName}</span>
+            </>
+          )}
+        </div>
+      </div>
+
+      <div className="flex-1 overflow-y-auto p-8 space-y-6 no-scrollbar bg-slate-50/20">
+        {messages.length === 0 ? (
+          <div className="h-full flex items-center justify-center text-slate-300 font-black text-xs uppercase tracking-widest">No messages yet. Say hello!</div>
+        ) : (
+          messages.map(m => (
+            <div key={m.id} className={`max-w-[80%] flex flex-col ${m.userId === user.uid ? 'items-end self-end' : 'items-start self-start'}`}>
+              <span className="text-[10px] font-black uppercase text-slate-400 mb-1 px-3">{m.userName}</span>
+              <div className={`p-5 rounded-[2rem] text-sm font-medium leading-relaxed shadow-sm ${m.userId === user.uid ? 'bg-indigo-600 text-white rounded-tr-none' : 'bg-white text-slate-700 border border-slate-100 rounded-tl-none'}`}>
+                {m.text}
+              </div>
+            </div>
+          ))
+        )}
+        <div ref={chatEndRef} />
+      </div>
+
+      <div className="p-6 border-t bg-white">
+        {!isEmailVerified && (
+          <p className="text-center text-[10px] font-black uppercase tracking-widest text-rose-400 mb-3">Verify your email to send messages</p>
+        )}
+        <form onSubmit={sendMessage} className="flex gap-3">
+          <input value={newMessage} onChange={e => setNewMessage(e.target.value)} disabled={!isEmailVerified} placeholder={isEmailVerified ? "Type a message..." : "Email verification required"} className="flex-1 bg-slate-50 rounded-[2rem] px-6 py-4 outline-none font-bold text-sm border-2 border-transparent focus:border-indigo-100 transition-all disabled:opacity-50" />
+          <button type="submit" disabled={!isEmailVerified} className="bg-slate-900 text-white px-6 py-4 rounded-[2rem] font-black text-[10px] uppercase tracking-widest shadow-xl active:scale-95 hover:bg-indigo-600 transition-all disabled:opacity-50">Send</button>
+        </form>
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="flex-1 max-w-3xl mx-auto w-full py-12 px-6">
+      <div className="flex items-center justify-between mb-10">
+        <div>
+          <h2 className="text-4xl font-black italic tracking-tighter uppercase mb-1">Private <span className="text-indigo-600">Messages</span></h2>
+          {!isEmailVerified && (
+            <p className="text-[10px] font-black uppercase tracking-widest text-rose-400">⚠️ Verify your email to unlock messaging</p>
+          )}
+        </div>
+        <button onClick={() => setShowCreateGroup(true)} className="bg-indigo-600 text-white px-5 py-3 rounded-[2rem] font-black text-[10px] uppercase tracking-widest shadow-lg hover:bg-indigo-700 transition-all">
+          + Create Group
+        </button>
+      </div>
+
+      {showCreateGroup && (
+        <div className="bg-white rounded-[3rem] border border-slate-100 shadow-2xl p-8 mb-8">
+          <h3 className="font-black text-lg uppercase tracking-tighter mb-6">Create Group Chat</h3>
+          <div className="space-y-4">
+            <input value={groupName} onChange={e => setGroupName(e.target.value)} placeholder="Group name" className="w-full bg-slate-50 rounded-[2rem] px-6 py-4 outline-none font-bold text-sm border-2 border-transparent focus:border-indigo-100 transition-all" />
+            <div className="flex gap-3">
+              <input value={searchUid} onChange={e => setSearchUid(e.target.value)} placeholder="Paste a user's ID to add them" className="flex-1 bg-slate-50 rounded-[2rem] px-6 py-4 outline-none font-bold text-sm border-2 border-transparent focus:border-indigo-100 transition-all" />
+              <button onClick={addMemberByUid} className="bg-slate-900 text-white px-5 py-4 rounded-[2rem] font-black text-[10px] uppercase tracking-widest hover:bg-indigo-600 transition-all">Add</button>
+            </div>
+            {groupMembers.length > 0 && (
+              <div className="flex flex-wrap gap-2">
+                {groupMembers.map(m => (
+                  <div key={m.uid} className="flex items-center gap-2 bg-indigo-50 text-indigo-600 px-4 py-2 rounded-full">
+                    <span className="font-black text-xs uppercase">{m.displayName}</span>
+                    <button onClick={() => setGroupMembers(prev => prev.filter(x => x.uid !== m.uid))} className="text-indigo-300 hover:text-rose-500">✕</button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <p className="text-[10px] font-black uppercase tracking-widest text-slate-300">Your user ID: {user.uid}</p>
+            <div className="flex gap-3">
+              <button onClick={createGroup} disabled={creating || !groupName.trim() || groupMembers.length < 1} className="flex-1 bg-indigo-600 text-white py-4 rounded-[2rem] font-black text-xs uppercase tracking-widest shadow-xl hover:bg-indigo-700 transition-all disabled:opacity-50">
+                {creating ? 'Creating...' : 'Create Group'}
+              </button>
+              <button onClick={() => setShowCreateGroup(false)} className="px-6 py-4 border-2 border-slate-100 text-slate-400 rounded-[2rem] font-black text-xs uppercase tracking-widest hover:bg-slate-50 transition-all">Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {conversations.length === 0 ? (
+        <div className="text-center py-24 text-slate-300 font-black text-xs uppercase tracking-widest">No conversations yet. Start chatting in the hubs to unlock private messages!</div>
+      ) : (
+        <div className="space-y-4">
+          {conversations.map(conv => (
+            <button key={conv.id} onClick={() => setActiveConv(conv)} className="w-full flex items-center gap-4 p-6 bg-white rounded-[2.5rem] border border-slate-100 shadow-sm hover:shadow-lg hover:-translate-y-1 transition-all text-left">
+              <div className={`w-12 h-12 rounded-full ${conv.type === 'dm' ? (conv.otherProfile?.color || 'bg-indigo-600') : 'bg-indigo-600'} flex items-center justify-center text-white font-black text-sm shrink-0`}>
+                {conv.type === 'dm' ? (conv.otherProfile?.displayName || 'U')[0] : '👥'}
+              </div>
+              <div>
+                <p className="font-black text-sm uppercase tracking-tight">{conv.type === 'dm' ? conv.otherProfile?.displayName : conv.groupName}</p>
+                <p className="text-[10px] font-black uppercase tracking-widest text-slate-300 mt-1">{conv.type === 'group' ? 'Group Chat' : 'Private Message'}</p>
+              </div>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function GiveAdvicePage({ user, isRegistered, onShowAuth }) {
   const [form, setForm] = useState({ name: '', email: '', categories: [], header: '', body: '' });
   const [fileContent, setFileContent] = useState('');
@@ -189,9 +541,7 @@ function GiveAdvicePage({ user, isRegistered, onShowAuth }) {
   const toggleCategory = (id) => {
     setForm(f => ({
       ...f,
-      categories: f.categories.includes(id)
-        ? f.categories.filter(c => c !== id)
-        : [...f.categories, id]
+      categories: f.categories.includes(id) ? f.categories.filter(c => c !== id) : [...f.categories, id]
     }));
   };
 
@@ -207,34 +557,20 @@ function GiveAdvicePage({ user, isRegistered, onShowAuth }) {
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!isRegistered) { onShowAuth(); return; }
-    if (!form.name || !form.email || !form.header || (!form.body && !fileContent)) {
-      setError('Please fill in all required fields.');
-      return;
-    }
-    if (form.categories.length === 0) {
-      setError('Please select at least one category.');
-      return;
-    }
+    if (!form.name || !form.email || !form.header || (!form.body && !fileContent)) { setError('Please fill in all required fields.'); return; }
+    if (form.categories.length === 0) { setError('Please select at least one category.'); return; }
     setSubmitting(true);
     setError('');
     try {
       await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'submissions'), {
-        name: form.name,
-        email: form.email,
-        categories: form.categories,
-        header: form.header,
-        body: form.body || fileContent,
-        fileName: fileName || '',
-        status: 'pending',
-        submittedBy: user.uid,
-        createdAt: serverTimestamp()
+        name: form.name, email: form.email, categories: form.categories,
+        header: form.header, body: form.body || fileContent,
+        fileName: fileName || '', status: 'pending',
+        submittedBy: user.uid, createdAt: serverTimestamp()
       });
       setSubmitted(true);
-    } catch (err) {
-      setError('Something went wrong. Please try again.');
-    } finally {
-      setSubmitting(false);
-    }
+    } catch (err) { setError('Something went wrong. Please try again.'); }
+    finally { setSubmitting(false); }
   };
 
   if (submitted) return (
@@ -253,10 +589,8 @@ function GiveAdvicePage({ user, isRegistered, onShowAuth }) {
         <p className="text-slate-400 font-medium">Share your writing wisdom with the community.</p>
         {!isRegistered && <p className="mt-4 text-[11px] font-black uppercase tracking-widest text-rose-400">You must be signed in to submit an article.</p>}
       </div>
-
       <div className="bg-white rounded-[4rem] shadow-2xl border border-slate-100 p-8 md:p-12 space-y-8">
         {error && <p className="text-rose-500 text-xs font-black uppercase tracking-widest bg-rose-50 px-4 py-3 rounded-2xl">{error}</p>}
-
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           <div>
             <label className="block text-[10px] font-black uppercase text-slate-400 tracking-[0.2em] mb-3">Your Name *</label>
@@ -267,7 +601,6 @@ function GiveAdvicePage({ user, isRegistered, onShowAuth }) {
             <input type="email" value={form.email} onChange={e => setForm({...form, email: e.target.value})} className="w-full bg-slate-50 rounded-[2rem] px-6 py-4 outline-none font-bold text-sm border-2 border-transparent focus:border-indigo-100 transition-all" placeholder="your@email.com" />
           </div>
         </div>
-
         <div>
           <label className="block text-[10px] font-black uppercase text-slate-400 tracking-[0.2em] mb-3">Categories * <span className="text-slate-300">(select all that apply)</span></label>
           <div className="flex flex-wrap gap-3">
@@ -278,17 +611,14 @@ function GiveAdvicePage({ user, isRegistered, onShowAuth }) {
             ))}
           </div>
         </div>
-
         <div>
           <label className="block text-[10px] font-black uppercase text-slate-400 tracking-[0.2em] mb-3">Article Title *</label>
           <input type="text" value={form.header} onChange={e => setForm({...form, header: e.target.value})} className="w-full bg-slate-50 rounded-[2rem] px-6 py-4 outline-none font-bold text-sm border-2 border-transparent focus:border-indigo-100 transition-all" placeholder="Enter your article title" />
         </div>
-
         <div>
           <label className="block text-[10px] font-black uppercase text-slate-400 tracking-[0.2em] mb-3">Article Content *</label>
           <textarea value={form.body} onChange={e => setForm({...form, body: e.target.value})} rows={10} className="w-full bg-slate-50 rounded-[2rem] px-6 py-4 outline-none font-medium text-sm border-2 border-transparent focus:border-indigo-100 transition-all resize-none leading-relaxed" placeholder="Paste your article here..." />
         </div>
-
         <div>
           <label className="block text-[10px] font-black uppercase text-slate-400 tracking-[0.2em] mb-3">Or Upload a File <span className="text-slate-300">(PDF or DOCX)</span></label>
           <label className="flex items-center gap-4 bg-slate-50 rounded-[2rem] px-6 py-4 cursor-pointer border-2 border-dashed border-slate-200 hover:border-indigo-200 transition-all">
@@ -297,7 +627,6 @@ function GiveAdvicePage({ user, isRegistered, onShowAuth }) {
             <input type="file" accept=".pdf,.docx,.txt" onChange={handleFile} className="hidden" />
           </label>
         </div>
-
         <button onClick={handleSubmit} disabled={submitting} className="w-full bg-indigo-600 text-white py-6 rounded-[2.5rem] font-black text-sm uppercase tracking-[0.2em] shadow-2xl hover:bg-indigo-700 transition-all disabled:opacity-50">
           {submitting ? 'Submitting...' : isRegistered ? 'Submit Article ✍️' : 'Sign In to Submit'}
         </button>
@@ -306,7 +635,6 @@ function GiveAdvicePage({ user, isRegistered, onShowAuth }) {
   );
 }
 
-// Articles Feed / Blog
 function ArticlesFeedPage() {
   const [articles, setArticles] = useState([]);
   const [selectedFilters, setSelectedFilters] = useState([]);
@@ -318,25 +646,18 @@ function ArticlesFeedPage() {
       where('status', '==', 'approved'),
       orderBy('createdAt', 'desc')
     );
-    const unsub = onSnapshot(q, (s) => {
+    const unsub = onSnapshot(q, s => {
       setArticles(s.docs.map(d => ({ id: d.id, ...d.data() })));
     });
     return () => unsub();
   }, []);
 
-  const toggleFilter = (id) => {
-    setSelectedFilters(f => f.includes(id) ? f.filter(x => x !== id) : [...f, id]);
-  };
-
-  const filtered = selectedFilters.length === 0
-    ? articles
-    : articles.filter(a => a.categories?.some(c => selectedFilters.includes(c)));
+  const toggleFilter = (id) => setSelectedFilters(f => f.includes(id) ? f.filter(x => x !== id) : [...f, id]);
+  const filtered = selectedFilters.length === 0 ? articles : articles.filter(a => a.categories?.some(c => selectedFilters.includes(c)));
 
   if (expandedArticle) return (
     <div className="flex-1 max-w-3xl mx-auto w-full py-16 px-6">
-      <button onClick={() => setExpandedArticle(null)} className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-slate-400 hover:text-indigo-600 transition-colors mb-10">
-        ← Back to Articles
-      </button>
+      <button onClick={() => setExpandedArticle(null)} className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-slate-400 hover:text-indigo-600 transition-colors mb-10">← Back to Articles</button>
       <div className="bg-white rounded-[4rem] shadow-2xl border border-slate-100 p-8 md:p-16">
         <div className="flex flex-wrap gap-2 mb-6">
           {expandedArticle.categories?.map(c => (
@@ -359,7 +680,6 @@ function ArticlesFeedPage() {
         <h2 className="text-5xl font-black italic tracking-tighter uppercase mb-4">Articles <span className="text-indigo-600">Feed</span></h2>
         <p className="text-slate-400 font-medium">Writing advice from the community.</p>
       </div>
-
       <div className="mb-10">
         <p className="text-[10px] font-black uppercase text-slate-400 tracking-[0.2em] mb-4">Filter by category</p>
         <div className="flex flex-wrap gap-3">
@@ -370,7 +690,6 @@ function ArticlesFeedPage() {
           ))}
         </div>
       </div>
-
       {filtered.length === 0 ? (
         <div className="text-center py-24 text-slate-300 font-black text-xs uppercase tracking-widest">No articles yet. Be the first to contribute!</div>
       ) : (
@@ -395,7 +714,6 @@ function ArticlesFeedPage() {
   );
 }
 
-// Admin Page
 function AdminPage({ user, isAdmin }) {
   const [submissions, setSubmissions] = useState([]);
   const [filter, setFilter] = useState('pending');
@@ -408,7 +726,7 @@ function AdminPage({ user, isAdmin }) {
       where('status', '==', filter),
       orderBy('createdAt', 'desc')
     );
-    const unsub = onSnapshot(q, (s) => {
+    const unsub = onSnapshot(q, s => {
       setSubmissions(s.docs.map(d => ({ id: d.id, ...d.data() })));
     });
     return () => unsub();
@@ -435,7 +753,6 @@ function AdminPage({ user, isAdmin }) {
         <h2 className="text-5xl font-black italic tracking-tighter uppercase mb-4">Article <span className="text-indigo-600">Review</span></h2>
         <p className="text-slate-400 font-medium">Review and approve submitted articles.</p>
       </div>
-
       <div className="flex gap-3 mb-10">
         {['pending', 'approved', 'rejected'].map(s => (
           <button key={s} onClick={() => setFilter(s)} className={`px-6 py-3 rounded-[2rem] font-black text-[11px] uppercase transition-all border-2 ${filter === s ? 'bg-indigo-600 text-white border-indigo-600 shadow-lg' : 'border-slate-100 text-slate-500 hover:bg-slate-50'}`}>
@@ -443,7 +760,6 @@ function AdminPage({ user, isAdmin }) {
           </button>
         ))}
       </div>
-
       {submissions.length === 0 ? (
         <div className="text-center py-24 text-slate-300 font-black text-xs uppercase tracking-widest">No {filter} submissions.</div>
       ) : (
@@ -466,32 +782,22 @@ function AdminPage({ user, isAdmin }) {
                   {expandedId === sub.id ? 'Hide ▲' : 'Read ▼'}
                 </button>
               </div>
-
               {expandedId === sub.id && (
                 <div className="bg-slate-50 rounded-[2rem] p-6 mb-6 text-sm text-slate-600 font-medium leading-relaxed whitespace-pre-wrap max-h-64 overflow-y-auto">
                   {sub.body}
                 </div>
               )}
-
               {filter === 'pending' && (
                 <div className="flex gap-3">
-                  <button onClick={() => updateStatus(sub.id, 'approved')} className="flex-1 bg-emerald-500 text-white py-3 rounded-[2rem] font-black text-[11px] uppercase tracking-widest hover:bg-emerald-600 transition-all shadow-lg">
-                    ✅ Approve
-                  </button>
-                  <button onClick={() => updateStatus(sub.id, 'rejected')} className="flex-1 bg-rose-500 text-white py-3 rounded-[2rem] font-black text-[11px] uppercase tracking-widest hover:bg-rose-600 transition-all shadow-lg">
-                    ❌ Reject
-                  </button>
+                  <button onClick={() => updateStatus(sub.id, 'approved')} className="flex-1 bg-emerald-500 text-white py-3 rounded-[2rem] font-black text-[11px] uppercase tracking-widest hover:bg-emerald-600 transition-all shadow-lg">✅ Approve</button>
+                  <button onClick={() => updateStatus(sub.id, 'rejected')} className="flex-1 bg-rose-500 text-white py-3 rounded-[2rem] font-black text-[11px] uppercase tracking-widest hover:bg-rose-600 transition-all shadow-lg">❌ Reject</button>
                 </div>
               )}
               {filter === 'approved' && (
-                <button onClick={() => updateStatus(sub.id, 'rejected')} className="w-full border-2 border-rose-200 text-rose-400 py-3 rounded-[2rem] font-black text-[11px] uppercase tracking-widest hover:bg-rose-50 transition-all">
-                  Revoke Approval
-                </button>
+                <button onClick={() => updateStatus(sub.id, 'rejected')} className="w-full border-2 border-rose-200 text-rose-400 py-3 rounded-[2rem] font-black text-[11px] uppercase tracking-widest hover:bg-rose-50 transition-all">Revoke Approval</button>
               )}
               {filter === 'rejected' && (
-                <button onClick={() => updateStatus(sub.id, 'approved')} className="w-full border-2 border-emerald-200 text-emerald-500 py-3 rounded-[2rem] font-black text-[11px] uppercase tracking-widest hover:bg-emerald-50 transition-all">
-                  Approve After All
-                </button>
+                <button onClick={() => updateStatus(sub.id, 'approved')} className="w-full border-2 border-emerald-200 text-emerald-500 py-3 rounded-[2rem] font-black text-[11px] uppercase tracking-widest hover:bg-emerald-50 transition-all">Approve After All</button>
               )}
             </div>
           ))}
@@ -510,18 +816,16 @@ export default function App() {
   const [newMessage, setNewMessage] = useState('');
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [isDMOpen, setIsDMOpen] = useState(false);
-  const [dmList, setDmList] = useState([]);
-  const [userProfile, setUserProfile] = useState({ displayName: 'Guest', color: 'bg-indigo-600', role: 'Reader' });
+  const [userProfile, setUserProfile] = useState({ displayName: 'Guest', color: 'bg-indigo-600', role: 'Reader', description: '' });
   const [isSaving, setIsSaving] = useState(false);
   const [showAuthModal, setShowAuthModal] = useState(false);
-
+  const [profilePopup, setProfilePopup] = useState(null);
   const chatEndRef = useRef(null);
 
   useEffect(() => {
     const initAuth = async () => {
-      try {
-        await signInAnonymously(auth);
-      } catch (err) { console.error("Auth error:", err); }
+      try { await signInAnonymously(auth); }
+      catch (err) { console.error("Auth error:", err); }
     };
     initAuth();
 
@@ -533,15 +837,10 @@ export default function App() {
         if (snap.exists()) {
           setUserProfile(snap.data());
         } else {
-          const initialProfile = { displayName: 'User_' + u.uid.slice(0, 4), color: 'bg-indigo-600', role: 'Reader' };
+          const initialProfile = { displayName: 'User_' + u.uid.slice(0, 4), color: 'bg-indigo-600', role: 'Reader', description: '' };
           await setDoc(profileRef, initialProfile);
           setUserProfile(initialProfile);
         }
-        const dmRef = collection(db, 'artifacts', appId, 'users', u.uid, 'dm_contacts');
-        const dmUnsub = onSnapshot(dmRef, (s) => {
-          setDmList(s.docs.map(d => ({ id: d.id, ...d.data() })));
-        }, (err) => console.error("DM listener error:", err));
-        return () => dmUnsub();
       }
     });
     return () => unsubscribe();
@@ -549,19 +848,19 @@ export default function App() {
 
   useEffect(() => {
     if (!user) return;
-    let pathSegment = view === 'books' ? `books_${genre}` : view === 'writers' ? `writers_${genre}` : `langs_${selectedLang}`;
-    if (!['books', 'writers', 'languages'].includes(view)) return;
+    const hubViews = ['books', 'writers', 'languages'];
+    if (!hubViews.includes(view)) return;
+    const pathSegment = getHubKey(view, genre, selectedLang);
+    if (!pathSegment) return;
 
     const q = query(
       collection(db, 'artifacts', appId, 'public', 'data', pathSegment),
       orderBy('createdAt', 'asc'),
       limit(50)
     );
-
-    const unsubscribe = onSnapshot(q, (s) => {
+    const unsubscribe = onSnapshot(q, s => {
       setMessages(s.docs.map(d => ({ id: d.id, ...d.data() })));
-    }, (err) => console.warn("Firestore error:", err));
-
+    }, err => console.warn("Firestore error:", err));
     return () => unsubscribe();
   }, [user, view, genre, selectedLang]);
 
@@ -572,11 +871,8 @@ export default function App() {
   const handlePost = async (e) => {
     e.preventDefault();
     if (!newMessage.trim() || !user) return;
-    if (user.isAnonymous) {
-      setShowAuthModal(true);
-      return;
-    }
-    let pathSegment = view === 'books' ? `books_${genre}` : view === 'writers' ? `writers_${genre}` : `langs_${selectedLang}`;
+    if (user.isAnonymous) { setShowAuthModal(true); return; }
+    const pathSegment = getHubKey(view, genre, selectedLang);
     try {
       await addDoc(collection(db, 'artifacts', appId, 'public', 'data', pathSegment), {
         text: newMessage,
@@ -585,6 +881,7 @@ export default function App() {
         userColor: userProfile.color || 'bg-indigo-600',
         createdAt: serverTimestamp()
       });
+      await trackActivity(user.uid, pathSegment);
       setNewMessage('');
     } catch (err) { console.error("Post error:", err); }
   };
@@ -595,7 +892,8 @@ export default function App() {
     try {
       await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'settings', 'profile'), userProfile);
       setView('home');
-    } catch (err) { console.error(err); } finally { setIsSaving(false); }
+    } catch (err) { console.error(err); }
+    finally { setIsSaving(false); }
   };
 
   const handleSignOut = async () => {
@@ -611,15 +909,39 @@ export default function App() {
     window.scrollTo(0, 0);
   };
 
+  const handleAvatarClick = async (msg) => {
+    if (msg.userId === user?.uid) return;
+    const profileRef = doc(db, 'artifacts', appId, 'users', msg.userId, 'settings', 'profile');
+    const snap = await getDoc(profileRef);
+    const profile = snap.exists() ? snap.data() : { displayName: msg.userName, color: msg.userColor };
+    setProfilePopup({ profile, theirUid: msg.userId });
+  };
+
+  const handleMessageClick = async (theirUid, theirProfile) => {
+    if (!user) return;
+    await getOrCreateDM(user.uid, theirUid);
+    navigateTo('messages');
+  };
+
   const isRegistered = user && !user.isAnonymous;
-  const isAdmin = user?.email === ADMIN_EMAIL;
+  const isEmailVerified = user?.emailVerified || false;
+  const isAdmin = !!ADMIN_EMAIL && user?.email === ADMIN_EMAIL;
 
   return (
     <div className="min-h-screen bg-white text-slate-900 font-sans flex flex-col relative overflow-x-hidden">
       {showAuthModal && (
-        <AuthModal
-          onClose={() => setShowAuthModal(false)}
-          onSuccess={() => setShowAuthModal(false)}
+        <AuthModal onClose={() => setShowAuthModal(false)} onSuccess={() => setShowAuthModal(false)} />
+      )}
+
+      {profilePopup && (
+        <ProfilePopup
+          profile={profilePopup.profile}
+          theirUid={profilePopup.theirUid}
+          myUid={user?.uid}
+          isEmailVerified={isEmailVerified}
+          isRegistered={isRegistered}
+          onClose={() => setProfilePopup(null)}
+          onMessageClick={handleMessageClick}
         />
       )}
 
@@ -632,13 +954,10 @@ export default function App() {
         </div>
         <div className="flex items-center gap-4">
           {!isRegistered && (
-            <button onClick={() => setShowAuthModal(true)} className="px-4 py-1.5 bg-indigo-600 text-white rounded-full font-black text-[10px] uppercase tracking-widest hover:bg-indigo-700 transition-all shadow-lg whitespace-nowrap">
-              Sign Up
-            </button>
+            <button onClick={() => setShowAuthModal(true)} className="px-4 py-1.5 bg-indigo-600 text-white rounded-full font-black text-[10px] uppercase tracking-widest hover:bg-indigo-700 transition-all shadow-lg whitespace-nowrap">Sign Up</button>
           )}
-          <button onClick={() => setIsDMOpen(true)} className="p-3 text-slate-400 hover:text-indigo-600 relative transition-colors">
+          <button onClick={() => navigateTo('messages')} className="p-3 text-slate-400 hover:text-indigo-600 relative transition-colors">
             <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" /></svg>
-            <span className="absolute top-3 right-3 w-2 h-2 bg-rose-500 rounded-full border-2 border-white"></span>
           </button>
           <button onClick={() => navigateTo('profile')} className={`w-10 h-10 rounded-full ${userProfile.color} flex items-center justify-center font-black text-white text-xs shadow-lg border-2 border-white transition-transform hover:scale-110`}>
             {(userProfile.displayName || 'U')[0]}
@@ -659,6 +978,12 @@ export default function App() {
               <span>{item.label}</span>
             </button>
           ))}
+          {isRegistered && (
+            <button onClick={() => navigateTo('messages')} className={`w-full text-left p-4 rounded-2xl font-black text-[12px] uppercase flex items-center gap-4 transition-all ${view === 'messages' ? 'bg-indigo-600 text-white shadow-xl' : 'hover:bg-slate-50 text-slate-500'}`}>
+              <span className="text-xl">💬</span>
+              <span>Private Messages</span>
+            </button>
+          )}
           {isAdmin && (
             <button onClick={() => navigateTo('admin')} className={`w-full text-left p-4 rounded-2xl font-black text-[12px] uppercase flex items-center gap-4 transition-all ${view === 'admin' ? 'bg-rose-500 text-white shadow-xl' : 'hover:bg-rose-50 text-rose-400'}`}>
               <span className="text-xl">🔒</span>
@@ -666,29 +991,6 @@ export default function App() {
             </button>
           )}
         </nav>
-      </aside>
-
-      <div className={`fixed inset-0 bg-slate-950/40 z-[1000] transition-opacity duration-300 ${isDMOpen ? 'opacity-100 visible' : 'opacity-0 invisible pointer-events-none'}`} onClick={() => setIsDMOpen(false)} />
-      <aside className={`fixed top-0 right-0 bottom-0 w-80 bg-white z-[1100] shadow-2xl transition-transform duration-300 ${isDMOpen ? 'translate-x-0' : 'translate-x-full'} flex flex-col`}>
-        <div className="p-8 border-b font-black text-rose-500 uppercase italic tracking-widest flex justify-between items-center shrink-0">
-          <span>Private Hub</span>
-          <button onClick={() => setIsDMOpen(false)} className="text-slate-300">✕</button>
-        </div>
-        <div className="flex-1 overflow-y-auto p-4 space-y-3">
-          {dmList.length === 0 ? (
-            <div className="text-center py-20 text-slate-400 text-[10px] font-black uppercase tracking-[0.2em]">No private messages.</div>
-          ) : (
-            dmList.map(contact => (
-              <button key={contact.id} className="w-full flex items-center gap-4 p-4 hover:bg-slate-50 rounded-2xl transition-all">
-                <div className={`w-10 h-10 rounded-full ${contact.color || 'bg-slate-200'} flex items-center justify-center text-white font-black text-xs`}>{(contact.displayName || 'U')[0]}</div>
-                <div className="text-left">
-                  <p className="font-black text-xs uppercase">{contact.displayName}</p>
-                  <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">{contact.role}</p>
-                </div>
-              </button>
-            ))
-          )}
-        </div>
       </aside>
 
       <main className="flex-1 flex flex-col relative z-0">
@@ -724,17 +1026,22 @@ export default function App() {
                 <div>
                   <h2 className="text-4xl font-black italic tracking-tighter uppercase leading-none mb-2">My <span className="text-indigo-600">Profile</span></h2>
                   {isRegistered && <p className="text-xs text-slate-400 font-bold">{user.email}</p>}
+                  {isRegistered && !isEmailVerified && (
+                    <p className="text-[10px] font-black uppercase tracking-widest text-rose-400 mt-1">⚠️ Email not verified — check your inbox</p>
+                  )}
                   {!isRegistered && (
-                    <button onClick={() => setShowAuthModal(true)} className="text-[10px] font-black uppercase tracking-widest text-indigo-600 hover:underline">
-                      Create an account →
-                    </button>
+                    <button onClick={() => setShowAuthModal(true)} className="text-[10px] font-black uppercase tracking-widest text-indigo-600 hover:underline">Create an account →</button>
                   )}
                 </div>
               </div>
               <div className="space-y-8">
                 <div>
                   <label className="block text-[10px] font-black uppercase text-slate-400 tracking-[0.2em] mb-4">Display Name</label>
-                  <input type="text" value={userProfile.displayName || ''} onChange={(e) => setUserProfile({...userProfile, displayName: e.target.value})} className="w-full bg-slate-50 rounded-3xl px-8 py-6 outline-none font-bold text-lg border-2 border-transparent focus:border-indigo-100 transition-all shadow-inner" />
+                  <input type="text" value={userProfile.displayName || ''} onChange={e => setUserProfile({...userProfile, displayName: e.target.value})} className="w-full bg-slate-50 rounded-3xl px-8 py-6 outline-none font-bold text-lg border-2 border-transparent focus:border-indigo-100 transition-all shadow-inner" />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-black uppercase text-slate-400 tracking-[0.2em] mb-4">About Me</label>
+                  <textarea value={userProfile.description || ''} onChange={e => setUserProfile({...userProfile, description: e.target.value})} rows={4} placeholder="Tell the community a little about yourself..." className="w-full bg-slate-50 rounded-3xl px-8 py-6 outline-none font-medium text-sm border-2 border-transparent focus:border-indigo-100 transition-all shadow-inner resize-none leading-relaxed" />
                 </div>
                 <div>
                   <label className="block text-[10px] font-black uppercase text-slate-400 tracking-[0.2em] mb-4">Avatar Theme</label>
@@ -744,6 +1051,13 @@ export default function App() {
                     ))}
                   </div>
                 </div>
+                {isRegistered && (
+                  <div className="bg-slate-50 rounded-3xl px-8 py-4">
+                    <p className="text-[10px] font-black uppercase text-slate-400 tracking-[0.2em] mb-1">Your User ID</p>
+                    <p className="font-mono text-xs text-slate-500 break-all">{user.uid}</p>
+                    <p className="text-[9px] font-black uppercase text-slate-300 tracking-widest mt-1">Share this with friends to add you to group chats</p>
+                  </div>
+                )}
               </div>
               <button onClick={saveProfile} disabled={isSaving} className="w-full bg-indigo-600 text-white py-6 rounded-[2.5rem] font-black text-sm uppercase tracking-[0.2em] shadow-2xl hover:bg-indigo-700 transition-all disabled:opacity-50">
                 {isSaving ? 'Updating...' : 'Save Changes'}
@@ -761,7 +1075,7 @@ export default function App() {
           <div className="flex-1 max-w-4xl mx-auto w-full py-24 px-6 text-center">
             <div className="text-6xl mb-8">💎</div>
             <h2 className="text-5xl font-black italic tracking-tighter mb-6 uppercase">Support the <span className="text-indigo-600">Creator</span></h2>
-            <a href="https://www.patreon.com/c/Emma2375" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-4 bg-[#FF424D] text-white px-12 py-6 rounded-[2.5rem] font-black text-lg uppercase tracking-widest shadow-2xl hover:scale-105 transition-all">Join on Patreon</a>
+            <a href="https://www.patreon.com" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-4 bg-[#FF424D] text-white px-12 py-6 rounded-[2.5rem] font-black text-lg uppercase tracking-widest shadow-2xl hover:scale-105 transition-all">Join on Patreon</a>
           </div>
         )}
 
@@ -778,22 +1092,20 @@ export default function App() {
           <GiveAdvicePage user={user} isRegistered={isRegistered} onShowAuth={() => setShowAuthModal(true)} />
         )}
 
-        {view === 'articles-feed' && (
-          <ArticlesFeedPage />
+        {view === 'articles-feed' && <ArticlesFeedPage />}
+        {view === 'admin' && <AdminPage user={user} isAdmin={isAdmin} />}
+        {view === 'messages' && (
+          <MessagesPage user={user} userProfile={userProfile} isEmailVerified={isEmailVerified} onShowAuth={() => setShowAuthModal(true)} />
         )}
 
-        {view === 'admin' && (
-          <AdminPage user={user} isAdmin={isAdmin} />
-        )}
-
-        {!['home', 'support', 'about', 'profile', 'give-advice', 'articles-feed', 'admin'].includes(view) && (
+        {!['home', 'support', 'about', 'profile', 'give-advice', 'articles-feed', 'admin', 'messages'].includes(view) && (
           <div className="max-w-7xl mx-auto w-full p-4 md:p-8 flex flex-col md:flex-row gap-8 flex-1">
             <aside className="w-full md:w-72 shrink-0">
               <div className="bg-white border rounded-[3.5rem] p-8 shadow-sm md:sticky md:top-28">
                 <h3 className="text-[10px] font-black uppercase text-slate-400 mb-8 tracking-[0.3em] px-4">Selection</h3>
                 <div className="flex flex-row md:flex-col overflow-x-auto no-scrollbar gap-3">
                   {(view === 'languages' ? LANGUAGES : GENRES).map(item => (
-                    <button key={item.id} onClick={() => view === 'languages' ? setSelectedLang(item.id) : setGenre(item.id)} className={`px-6 py-5 rounded-[2rem] font-black text-[11px] uppercase flex items-center gap-5 transition-all shrink-0 md:shrink border-2 ${ (view === 'languages' ? selectedLang : genre) === item.id ? 'bg-indigo-600 text-white shadow-xl border-indigo-600' : 'hover:bg-slate-50 text-slate-500 border-transparent'}`}>
+                    <button key={item.id} onClick={() => view === 'languages' ? setSelectedLang(item.id) : setGenre(item.id)} className={`px-6 py-5 rounded-[2rem] font-black text-[11px] uppercase flex items-center gap-5 transition-all shrink-0 md:shrink border-2 ${(view === 'languages' ? selectedLang : genre) === item.id ? 'bg-indigo-600 text-white shadow-xl border-indigo-600' : 'hover:bg-slate-50 text-slate-500 border-transparent'}`}>
                       <span className="text-2xl">{item.icon}</span>
                       <span className="tracking-tight">{item.name}</span>
                     </button>
@@ -814,21 +1126,31 @@ export default function App() {
               <header className="p-10 border-b flex items-center justify-between">
                 <div className="flex items-center gap-5">
                   <div className="w-16 h-16 bg-slate-50 rounded-[1.5rem] flex items-center justify-center text-3xl shadow-inner border border-slate-100">
-                    {(view === 'languages' ? LANGUAGES.find(l=>l.id===selectedLang) : GENRES.find(g=>g.id===genre))?.icon}
+                    {(view === 'languages' ? LANGUAGES.find(l => l.id === selectedLang) : GENRES.find(g => g.id === genre))?.icon}
                   </div>
                   <h2 className="font-black text-xl uppercase tracking-tighter text-slate-900 leading-tight">
                     {view === 'languages' ? selectedLang : genre} Lounge
                   </h2>
                 </div>
+                {isRegistered && (
+                  <button onClick={() => navigateTo('messages')} className="text-[10px] font-black uppercase tracking-widest text-indigo-600 hover:underline flex items-center gap-2">
+                    💬 Messages
+                  </button>
+                )}
               </header>
 
               <div className="flex-1 overflow-y-auto p-8 md:p-12 space-y-8 no-scrollbar bg-slate-50/20">
                 {messages.length === 0 ? (
                   <div className="h-full flex items-center justify-center text-slate-300 font-black text-xs uppercase tracking-widest">Start the conversation...</div>
                 ) : (
-                  messages.map((m) => (
+                  messages.map(m => (
                     <div key={m.id} className={`max-w-[85%] flex flex-col ${m.userId === user?.uid ? 'items-end self-end' : 'items-start self-start'}`}>
-                      <span className="text-[10px] font-black uppercase text-slate-400 mb-2 px-3">{m.userName || 'Anonymous'}</span>
+                      <div className={`flex items-center gap-2 mb-2 ${m.userId === user?.uid ? 'flex-row-reverse' : 'flex-row'}`}>
+                        <button onClick={() => handleAvatarClick(m)} className={`w-8 h-8 rounded-full ${m.userColor || 'bg-indigo-600'} flex items-center justify-center text-white font-black text-xs shadow-md hover:scale-110 transition-transform ${m.userId === user?.uid ? 'cursor-default' : 'cursor-pointer'}`}>
+                          {(m.userName || 'U')[0]}
+                        </button>
+                        <span className="text-[10px] font-black uppercase text-slate-400 px-1">{m.userName || 'Anonymous'}</span>
+                      </div>
                       <div className={`p-6 rounded-[2.5rem] text-[15px] font-medium leading-relaxed shadow-sm ${m.userId === user?.uid ? 'bg-indigo-600 text-white rounded-tr-none' : 'bg-white text-slate-700 border border-slate-100 rounded-tl-none'}`}>
                         {m.text}
                       </div>
@@ -846,9 +1168,7 @@ export default function App() {
                 )}
                 <form onSubmit={handlePost} className="flex flex-row gap-2 max-w-5xl mx-auto w-full">
                   <input value={newMessage} onChange={e => setNewMessage(e.target.value)} placeholder={isRegistered ? "Share thoughts..." : "Sign up to post..."} className="flex-1 min-w-0 bg-slate-50 rounded-[2.5rem] px-6 py-4 outline-none font-bold text-sm border-2 border-transparent focus:border-indigo-100 transition-all" />
-                  <button type="submit" className="bg-slate-900 text-white px-6 py-4 rounded-[2.5rem] font-black text-[10px] uppercase tracking-widest shadow-2xl active:scale-95 hover:bg-indigo-600 transition-all shrink-0">
-                    Send 🚀
-                  </button>
+                  <button type="submit" className="bg-slate-900 text-white px-6 py-4 rounded-[2.5rem] font-black text-[10px] uppercase tracking-widest shadow-2xl active:scale-95 hover:bg-indigo-600 transition-all shrink-0">Send 🚀</button>
                 </form>
               </div>
             </div>
@@ -865,7 +1185,7 @@ export default function App() {
           <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-600">© 2026 THE HUB COMMUNITY.</p>
         </div>
       </footer>
-      <style dangerouslySetInnerHTML={{ __html: `.no-scrollbar::-webkit-scrollbar { display: none; } .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }`}} />
+      <style dangerouslySetInnerHTML={{ __html: `.no-scrollbar::-webkit-scrollbar { display: none; } .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }` }} />
     </div>
   );
 }
