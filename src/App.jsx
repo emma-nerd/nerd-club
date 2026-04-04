@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { initializeApp } from 'firebase/app';
 import {
   getAuth,
@@ -19,7 +19,6 @@ import {
   collection,
   doc,
   getDoc,
-  getDocs,
   setDoc,
   addDoc,
   updateDoc,
@@ -106,9 +105,7 @@ const trackActivity = async (userId, hubKey) => {
   const today = todayStr();
   if (snap.exists()) {
     const days = snap.data().days || [];
-    if (!days.includes(today)) {
-      await updateDoc(activityRef, { days: arrayUnion(today) });
-    }
+    if (!days.includes(today)) await updateDoc(activityRef, { days: arrayUnion(today) });
   } else {
     await setDoc(activityRef, { days: [today] });
   }
@@ -140,14 +137,38 @@ const getOrCreateDM = async (myUid, theirUid) => {
   const dmRef = doc(db, 'artifacts', appId, 'dms', dmId);
   const snap = await getDoc(dmRef);
   if (!snap.exists()) {
-    await setDoc(dmRef, {
-      participants: ids,
-      createdAt: serverTimestamp(),
-      type: 'dm'
-    });
+    await setDoc(dmRef, { participants: ids, createdAt: serverTimestamp(), type: 'dm' });
   }
   return dmId;
 };
+
+const sendNotification = async (toUid, type, data) => {
+  if (!toUid) return;
+  await addDoc(collection(db, 'artifacts', appId, 'users', toUid, 'notifications'), {
+    type, ...data, read: false, createdAt: serverTimestamp()
+  });
+};
+
+function MessageText({ text, currentUserName }) {
+  if (!text) return null;
+  const parts = text.split(/(@\S+)/g);
+  return (
+    <span>
+      {parts.map((part, i) => {
+        if (part.startsWith('@')) {
+          const mentionName = part.slice(1).toLowerCase();
+          const isMe = currentUserName && mentionName === currentUserName.toLowerCase();
+          return (
+            <span key={i} className={`font-black rounded px-1 ${isMe ? 'bg-yellow-300 text-slate-900' : 'text-indigo-300 font-black'}`}>
+              {part}
+            </span>
+          );
+        }
+        return <span key={i}>{part}</span>;
+      })}
+    </span>
+  );
+}
 
 function AuthModal({ onClose, onSuccess }) {
   const [mode, setMode] = useState('login');
@@ -157,8 +178,7 @@ function AuthModal({ onClose, onSuccess }) {
   const [loading, setLoading] = useState(false);
 
   const handleEmailAuth = async () => {
-    setError('');
-    setLoading(true);
+    setError(''); setLoading(true);
     try {
       const currentUser = auth.currentUser;
       const credential = EmailAuthProvider.credential(email, password);
@@ -180,28 +200,20 @@ function AuthModal({ onClose, onSuccess }) {
       else if (err.code === 'auth/weak-password') setError('Password must be at least 6 characters.');
       else if (err.code === 'auth/wrong-password' || err.code === 'auth/user-not-found') setError('Incorrect email or password.');
       else setError('Something went wrong. Please try again.');
-    } finally {
-      setLoading(false);
-    }
+    } finally { setLoading(false); }
   };
 
   const handleGoogle = async () => {
-    setError('');
-    setLoading(true);
+    setError(''); setLoading(true);
     try {
       const currentUser = auth.currentUser;
-      if (currentUser?.isAnonymous) {
-        await linkWithPopup(currentUser, googleProvider);
-      } else {
-        await signInWithPopup(auth, googleProvider);
-      }
+      if (currentUser?.isAnonymous) await linkWithPopup(currentUser, googleProvider);
+      else await signInWithPopup(auth, googleProvider);
       onSuccess();
     } catch (err) {
       if (err.code === 'auth/popup-closed-by-user') setError('');
       else setError('Google sign-in failed. Please try again.');
-    } finally {
-      setLoading(false);
-    }
+    } finally { setLoading(false); }
   };
 
   return (
@@ -215,7 +227,7 @@ function AuthModal({ onClose, onSuccess }) {
         </div>
         {mode === 'signup' && (
           <p className="text-[10px] font-black uppercase tracking-widest text-indigo-600 bg-indigo-50 px-4 py-3 rounded-2xl mb-6">
-            A verification email will be sent after sign up. You'll need to verify your email to send private messages.
+            A verification email will be sent after sign up.
           </p>
         )}
         {error && <p className="text-rose-500 text-xs font-black uppercase tracking-widest mb-6 bg-rose-50 px-4 py-3 rounded-2xl">{error}</p>}
@@ -246,19 +258,83 @@ function AuthModal({ onClose, onSuccess }) {
   );
 }
 
+function NotificationBell({ user }) {
+  const [notifications, setNotifications] = useState([]);
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    if (!user || user.isAnonymous) return;
+    const q = query(
+      collection(db, 'artifacts', appId, 'users', user.uid, 'notifications'),
+      orderBy('createdAt', 'desc'),
+      limit(20)
+    );
+    const unsub = onSnapshot(q, snap => {
+      setNotifications(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    });
+    return () => unsub();
+  }, [user]);
+
+  const unreadCount = notifications.filter(n => !n.read).length;
+
+  const markAllRead = async () => {
+    notifications.filter(n => !n.read).forEach(async n => {
+      await updateDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'notifications', n.id), { read: true });
+    });
+  };
+
+  const getNotificationText = (n) => {
+    if (n.type === 'mention') return `${n.senderName} mentioned you in ${n.hubName}`;
+    if (n.type === 'dm') return `${n.senderName} sent you a private message`;
+    if (n.type === 'group_mention') return `${n.senderName} mentioned you in ${n.groupName}`;
+    return 'New notification';
+  };
+
+  if (!user || user.isAnonymous) return null;
+
+  return (
+    <div className="relative">
+      <button onClick={() => { setOpen(!open); if (!open) markAllRead(); }} className="p-3 text-slate-400 hover:text-indigo-600 relative transition-colors">
+        <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
+        </svg>
+        {unreadCount > 0 && (
+          <span className="absolute top-2 right-2 w-4 h-4 bg-rose-500 rounded-full border-2 border-white text-white text-[8px] font-black flex items-center justify-center">
+            {unreadCount > 9 ? '9+' : unreadCount}
+          </span>
+        )}
+      </button>
+      {open && (
+        <div className="absolute right-0 top-14 w-80 bg-white rounded-[2rem] shadow-2xl border border-slate-100 z-[600] overflow-hidden">
+          <div className="p-6 border-b flex items-center justify-between">
+            <span className="font-black text-sm uppercase tracking-tight">Notifications</span>
+            <button onClick={() => setOpen(false)} className="text-slate-300">✕</button>
+          </div>
+          <div className="max-h-96 overflow-y-auto">
+            {notifications.length === 0 ? (
+              <div className="p-8 text-center text-slate-300 font-black text-xs uppercase tracking-widest">No notifications yet</div>
+            ) : (
+              notifications.map(n => (
+                <div key={n.id} className={`p-4 border-b border-slate-50 ${!n.read ? 'bg-indigo-50/50' : ''}`}>
+                  <p className="text-xs font-bold text-slate-600">{getNotificationText(n)}</p>
+                  {n.messagePreview && <p className="text-[11px] text-slate-400 mt-1 truncate">"{n.messagePreview}"</p>}
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ProfilePopup({ profile, theirUid, myUid, isEmailVerified, isRegistered, onClose, onMessageClick }) {
   const [canMessage, setCanMessage] = useState(false);
   const [checking, setChecking] = useState(true);
 
   useEffect(() => {
-    if (!myUid || !theirUid || !isRegistered || !isEmailVerified) {
-      setChecking(false);
-      return;
-    }
-    checkCanMessage(myUid, theirUid).then(result => {
-      setCanMessage(result);
-      setChecking(false);
-    });
+    if (!myUid || !theirUid || !isRegistered || !isEmailVerified) { setChecking(false); return; }
+    checkCanMessage(myUid, theirUid).then(result => { setCanMessage(result); setChecking(false); });
   }, [myUid, theirUid, isRegistered, isEmailVerified]);
 
   const getMessageBlockedReason = () => {
@@ -285,9 +361,7 @@ function ProfilePopup({ profile, theirUid, myUid, isEmailVerified, isRegistered,
             {profile.role && <p className="text-[10px] font-black uppercase tracking-widest text-indigo-600 mt-1">{profile.role}</p>}
           </div>
           {profile.description && (
-            <p className="text-slate-500 text-sm font-medium leading-relaxed bg-slate-50 rounded-2xl px-4 py-3 w-full text-left">
-              {profile.description}
-            </p>
+            <p className="text-slate-500 text-sm font-medium leading-relaxed bg-slate-50 rounded-2xl px-4 py-3 w-full text-left">{profile.description}</p>
           )}
           {myUid !== theirUid && (
             <div className="w-full mt-2">
@@ -308,6 +382,207 @@ function ProfilePopup({ profile, theirUid, myUid, isEmailVerified, isRegistered,
   );
 }
 
+function ChatBox({ messages, user, userProfile, isRegistered, onPost, onShowAuth, pathSegment, onAvatarClick }) {
+  const [newMessage, setNewMessage] = useState('');
+  const [replyTo, setReplyTo] = useState(null);
+  const [editingId, setEditingId] = useState(null);
+  const [editText, setEditText] = useState('');
+  const [showMentions, setShowMentions] = useState(false);
+  const [mentionQuery, setMentionQuery] = useState('');
+  const [mentionUsers, setMentionUsers] = useState([]);
+  const [unreadCount, setUnreadCount] = useState(0);
+  const [lastReadId, setLastReadId] = useState(null);
+  const [initialScrollDone, setInitialScrollDone] = useState(false);
+  const chatEndRef = useRef(null);
+  const chatContainerRef = useRef(null);
+  const inputRef = useRef(null);
+
+  useEffect(() => {
+    if (!user || user.isAnonymous || !pathSegment) return;
+    const readRef = doc(db, 'artifacts', appId, 'users', user.uid, 'readPositions', pathSegment);
+    getDoc(readRef).then(snap => {
+      if (snap.exists()) setLastReadId(snap.data().lastReadId);
+    });
+  }, [user, pathSegment]);
+
+  useEffect(() => {
+    if (!messages.length) return;
+    if (!lastReadId) {
+      if (!initialScrollDone) {
+        chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+        setInitialScrollDone(true);
+      }
+      return;
+    }
+    const lastReadIndex = messages.findIndex(m => m.id === lastReadId);
+    if (lastReadIndex === -1) setUnreadCount(messages.length);
+    else setUnreadCount(messages.length - lastReadIndex - 1);
+
+    if (!initialScrollDone) {
+      const el = document.getElementById(`msg-${lastReadId}`);
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      else chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      setInitialScrollDone(true);
+    }
+  }, [messages, lastReadId, initialScrollDone]);
+
+  useEffect(() => {
+    if (!messages.length) return;
+    const seen = new Map();
+    messages.forEach(m => {
+      if (m.userId !== user?.uid && !seen.has(m.userId)) {
+        seen.set(m.userId, { uid: m.userId, displayName: m.userName, color: m.userColor });
+      }
+    });
+    setMentionUsers([...seen.values()]);
+  }, [messages]);
+
+  const handleScroll = useCallback(() => {
+    if (!chatContainerRef.current || !user || user.isAnonymous || !messages.length || !pathSegment) return;
+    const { scrollTop, scrollHeight, clientHeight } = chatContainerRef.current;
+    const isAtBottom = scrollHeight - scrollTop - clientHeight < 50;
+    if (isAtBottom) {
+      const lastMsg = messages[messages.length - 1];
+      setLastReadId(lastMsg.id);
+      setUnreadCount(0);
+      const readRef = doc(db, 'artifacts', appId, 'users', user.uid, 'readPositions', pathSegment);
+      setDoc(readRef, { lastReadId: lastMsg.id, updatedAt: serverTimestamp() });
+    }
+  }, [messages, user, pathSegment]);
+
+  const handleInputChange = (e) => {
+    const val = e.target.value;
+    setNewMessage(val);
+    const atIndex = val.lastIndexOf('@');
+    if (atIndex !== -1 && (atIndex === 0 || val[atIndex - 1] === ' ')) {
+      const q = val.slice(atIndex + 1).toLowerCase();
+      setMentionQuery(q);
+      setShowMentions(true);
+    } else {
+      setShowMentions(false);
+    }
+  };
+
+  const insertMention = (u) => {
+    const atIndex = newMessage.lastIndexOf('@');
+    const before = newMessage.slice(0, atIndex);
+    setNewMessage(`${before}@${u.displayName} `);
+    setShowMentions(false);
+    inputRef.current?.focus();
+  };
+
+  const filteredMentions = mentionUsers.filter(u =>
+    u.displayName?.toLowerCase().includes(mentionQuery) || u.uid?.toLowerCase().includes(mentionQuery)
+  );
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!newMessage.trim()) return;
+    await onPost(newMessage, replyTo);
+    setNewMessage('');
+    setReplyTo(null);
+    setShowMentions(false);
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  };
+
+  const handleEdit = async (msgId) => {
+    if (!editText.trim()) return;
+    await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', pathSegment, msgId), { text: editText, edited: true });
+    setEditingId(null);
+    setEditText('');
+  };
+
+  return (
+    <div className="flex-1 flex flex-col overflow-hidden">
+      {unreadCount > 0 && (
+        <div className="bg-indigo-600 text-white text-center py-2 text-[10px] font-black uppercase tracking-widest cursor-pointer" onClick={() => chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })}>
+          {unreadCount} unread message{unreadCount !== 1 ? 's' : ''} — tap to scroll down ↓
+        </div>
+      )}
+
+      <div ref={chatContainerRef} onScroll={handleScroll} className="flex-1 overflow-y-auto p-8 md:p-12 space-y-8 no-scrollbar bg-slate-50/20">
+        {messages.length === 0 ? (
+          <div className="h-full flex items-center justify-center text-slate-300 font-black text-xs uppercase tracking-widest">Start the conversation...</div>
+        ) : (
+          messages.map(m => (
+            <div key={m.id} id={`msg-${m.id}`} className={`max-w-[85%] flex flex-col ${m.userId === user?.uid ? 'items-end self-end' : 'items-start self-start'}`}>
+              <div className={`flex items-center gap-2 mb-2 ${m.userId === user?.uid ? 'flex-row-reverse' : 'flex-row'}`}>
+                <button onClick={() => onAvatarClick(m)} className={`w-8 h-8 rounded-full ${m.userColor || 'bg-indigo-600'} flex items-center justify-center text-white font-black text-xs shadow-md hover:scale-110 transition-transform ${m.userId === user?.uid ? 'cursor-default' : 'cursor-pointer'}`}>
+                  {(m.userName || 'U')[0]}
+                </button>
+                <span className="text-[10px] font-black uppercase text-slate-400 px-1">{m.userName || 'Anonymous'}</span>
+              </div>
+
+              {m.replyTo && (
+                <div className={`text-[10px] font-bold text-slate-400 bg-slate-100 rounded-2xl px-4 py-2 mb-1 max-w-[90%] truncate ${m.userId === user?.uid ? 'self-end' : 'self-start'}`}>
+                  ↩ {m.replyTo.userName}: {m.replyTo.text?.slice(0, 60)}
+                </div>
+              )}
+
+              {editingId === m.id ? (
+                <div className="flex gap-2 w-full max-w-md">
+                  <input value={editText} onChange={e => setEditText(e.target.value)} className="flex-1 bg-slate-50 rounded-[2rem] px-4 py-2 outline-none font-bold text-sm border-2 border-indigo-100" />
+                  <button onClick={() => handleEdit(m.id)} className="bg-indigo-600 text-white px-4 py-2 rounded-[2rem] font-black text-xs">Save</button>
+                  <button onClick={() => setEditingId(null)} className="border-2 border-slate-100 text-slate-400 px-4 py-2 rounded-[2rem] font-black text-xs">Cancel</button>
+                </div>
+              ) : (
+                <div className={`p-6 rounded-[2.5rem] text-[15px] font-medium leading-relaxed shadow-sm ${m.userId === user?.uid ? 'bg-indigo-600 text-white rounded-tr-none' : 'bg-white text-slate-700 border border-slate-100 rounded-tl-none'}`}>
+                  <MessageText text={m.text} currentUserName={userProfile?.displayName} />
+                  {m.edited && <span className="text-[10px] opacity-60 ml-2">(edited)</span>}
+                </div>
+              )}
+
+              <div className={`flex gap-3 mt-1 ${m.userId === user?.uid ? 'flex-row-reverse' : 'flex-row'}`}>
+                <button onClick={() => setReplyTo({ id: m.id, text: m.text, userName: m.userName })} className="text-[9px] font-black uppercase text-slate-300 hover:text-indigo-600 transition-colors">↩ Reply</button>
+                {m.userId === user?.uid && (
+                  <button onClick={() => { setEditingId(m.id); setEditText(m.text); }} className="text-[9px] font-black uppercase text-slate-300 hover:text-indigo-600 transition-colors">✏️ Edit</button>
+                )}
+              </div>
+            </div>
+          ))
+        )}
+        <div ref={chatEndRef} />
+      </div>
+
+      <div className="p-4 md:p-6 border-t bg-white shrink-0">
+        {replyTo && (
+          <div className="flex items-center justify-between bg-indigo-50 rounded-2xl px-4 py-2 mb-3">
+            <p className="text-[10px] font-black uppercase text-indigo-600 truncate">↩ Replying to {replyTo.userName}: {replyTo.text?.slice(0, 40)}...</p>
+            <button onClick={() => setReplyTo(null)} className="text-indigo-300 hover:text-rose-500 ml-2">✕</button>
+          </div>
+        )}
+        {!isRegistered && (
+          <p className="text-center text-[10px] font-black uppercase tracking-widest text-slate-400 mb-4">
+            <button onClick={onShowAuth} className="text-indigo-600 hover:underline">Sign up</button> to join the conversation
+          </p>
+        )}
+        {showMentions && filteredMentions.length > 0 && (
+          <div className="bg-white border border-slate-100 rounded-2xl shadow-xl mb-2 overflow-hidden">
+            {filteredMentions.slice(0, 5).map(u => (
+              <button key={u.uid} onClick={() => insertMention(u)} className="w-full flex items-center gap-3 px-4 py-3 hover:bg-slate-50 transition-colors text-left">
+                <div className={`w-7 h-7 rounded-full ${u.color || 'bg-indigo-600'} flex items-center justify-center text-white font-black text-xs`}>
+                  {(u.displayName || 'U')[0]}
+                </div>
+                <span className="font-black text-xs uppercase text-slate-600">{u.displayName}</span>
+              </button>
+            ))}
+          </div>
+        )}
+        <form onSubmit={handleSubmit} className="flex flex-row gap-2 max-w-5xl mx-auto w-full">
+          <input
+            ref={inputRef}
+            value={newMessage}
+            onChange={handleInputChange}
+            placeholder={isRegistered ? "Share thoughts... (@ to mention)" : "Sign up to post..."}
+            className="flex-1 min-w-0 bg-slate-50 rounded-[2.5rem] px-6 py-4 outline-none font-bold text-sm border-2 border-transparent focus:border-indigo-100 transition-all"
+          />
+          <button type="submit" className="bg-slate-900 text-white px-6 py-4 rounded-[2.5rem] font-black text-[10px] uppercase tracking-widest shadow-2xl active:scale-95 hover:bg-indigo-600 transition-all shrink-0">Send 🚀</button>
+        </form>
+      </div>
+    </div>
+  );
+}
+
 function MessagesPage({ user, userProfile, isEmailVerified, onShowAuth }) {
   const [conversations, setConversations] = useState([]);
   const [activeConv, setActiveConv] = useState(null);
@@ -318,21 +593,22 @@ function MessagesPage({ user, userProfile, isEmailVerified, onShowAuth }) {
   const [searchUid, setSearchUid] = useState('');
   const [groupMembers, setGroupMembers] = useState([]);
   const [creating, setCreating] = useState(false);
+  const [replyTo, setReplyTo] = useState(null);
+  const [editingId, setEditingId] = useState(null);
+  const [editText, setEditText] = useState('');
+  const [unreadCounts, setUnreadCounts] = useState({});
   const chatEndRef = useRef(null);
+  const chatContainerRef = useRef(null);
 
   useEffect(() => {
     if (!user || user.isAnonymous) return;
-    const q = query(
-      collection(db, 'artifacts', appId, 'dms'),
-      where('participants', 'array-contains', user.uid)
-    );
+    const q = query(collection(db, 'artifacts', appId, 'dms'), where('participants', 'array-contains', user.uid));
     const unsub = onSnapshot(q, async (snap) => {
       const convs = await Promise.all(snap.docs.map(async d => {
         const data = { id: d.id, ...d.data() };
         if (data.type === 'dm') {
           const otherId = data.participants.find(p => p !== user.uid);
-          const profileRef = doc(db, 'artifacts', appId, 'users', otherId, 'settings', 'profile');
-          const profileSnap = await getDoc(profileRef);
+          const profileSnap = await getDoc(doc(db, 'artifacts', appId, 'users', otherId, 'settings', 'profile'));
           data.otherProfile = profileSnap.exists() ? profileSnap.data() : { displayName: 'User' };
           data.otherUid = otherId;
         }
@@ -345,14 +621,8 @@ function MessagesPage({ user, userProfile, isEmailVerified, onShowAuth }) {
 
   useEffect(() => {
     if (!activeConv) return;
-    const q = query(
-      collection(db, 'artifacts', appId, 'dms', activeConv.id, 'messages'),
-      orderBy('createdAt', 'asc'),
-      limit(100)
-    );
-    const unsub = onSnapshot(q, snap => {
-      setMessages(snap.docs.map(d => ({ id: d.id, ...d.data() })));
-    });
+    const q = query(collection(db, 'artifacts', appId, 'dms', activeConv.id, 'messages'), orderBy('createdAt', 'asc'), limit(100));
+    const unsub = onSnapshot(q, snap => setMessages(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
     return () => unsub();
   }, [activeConv]);
 
@@ -360,17 +630,46 @@ function MessagesPage({ user, userProfile, isEmailVerified, onShowAuth }) {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
+  const handleScroll = useCallback(() => {
+    if (!chatContainerRef.current || !user || !activeConv || !messages.length) return;
+    const { scrollTop, scrollHeight, clientHeight } = chatContainerRef.current;
+    if (scrollHeight - scrollTop - clientHeight < 50) {
+      const lastMsg = messages[messages.length - 1];
+      const readRef = doc(db, 'artifacts', appId, 'users', user.uid, 'readPositions', `dm_${activeConv.id}`);
+      setDoc(readRef, { lastReadId: lastMsg.id, updatedAt: serverTimestamp() });
+      setUnreadCounts(prev => ({ ...prev, [activeConv.id]: 0 }));
+    }
+  }, [messages, user, activeConv]);
+
   const sendMessage = async (e) => {
     e.preventDefault();
     if (!newMessage.trim() || !activeConv) return;
-    await addDoc(collection(db, 'artifacts', appId, 'dms', activeConv.id, 'messages'), {
+    const msgData = {
       text: newMessage,
       userId: user.uid,
       userName: userProfile.displayName || 'User',
       userColor: userProfile.color || 'bg-indigo-600',
       createdAt: serverTimestamp()
-    });
+    };
+    if (replyTo) msgData.replyTo = replyTo;
+    await addDoc(collection(db, 'artifacts', appId, 'dms', activeConv.id, 'messages'), msgData);
+    const others = activeConv.participants?.filter(p => p !== user.uid) || [];
+    for (const uid of others) {
+      await sendNotification(uid, 'dm', {
+        senderName: userProfile.displayName || 'Someone',
+        messagePreview: newMessage.slice(0, 60),
+        convId: activeConv.id
+      });
+    }
     setNewMessage('');
+    setReplyTo(null);
+  };
+
+  const handleEdit = async (msgId) => {
+    if (!editText.trim()) return;
+    await updateDoc(doc(db, 'artifacts', appId, 'dms', activeConv.id, 'messages', msgId), { text: editText, edited: true });
+    setEditingId(null);
+    setEditText('');
   };
 
   const createGroup = async () => {
@@ -380,31 +679,20 @@ function MessagesPage({ user, userProfile, isEmailVerified, onShowAuth }) {
       const allMembers = [user.uid, ...groupMembers.map(m => m.uid)];
       if (allMembers.length > 10) { alert('Maximum 10 members allowed.'); return; }
       await addDoc(collection(db, 'artifacts', appId, 'dms'), {
-        participants: allMembers,
-        groupName,
-        type: 'group',
-        createdBy: user.uid,
-        createdAt: serverTimestamp()
+        participants: allMembers, groupName, type: 'group',
+        createdBy: user.uid, createdAt: serverTimestamp()
       });
-      setShowCreateGroup(false);
-      setGroupName('');
-      setGroupMembers([]);
+      setShowCreateGroup(false); setGroupName(''); setGroupMembers([]);
     } catch (err) { console.error(err); }
     finally { setCreating(false); }
   };
 
   const addMemberByUid = async () => {
-    if (!searchUid.trim()) return;
-    if (groupMembers.find(m => m.uid === searchUid)) return;
-    if (groupMembers.length >= 9) { alert('Maximum 9 additional members (10 total including you).'); return; }
-    const profileRef = doc(db, 'artifacts', appId, 'users', searchUid, 'settings', 'profile');
-    const snap = await getDoc(profileRef);
-    if (snap.exists()) {
-      setGroupMembers(prev => [...prev, { uid: searchUid, ...snap.data() }]);
-      setSearchUid('');
-    } else {
-      alert('User not found. Make sure you have the correct user ID.');
-    }
+    if (!searchUid.trim() || groupMembers.find(m => m.uid === searchUid)) return;
+    if (groupMembers.length >= 9) { alert('Maximum 9 additional members.'); return; }
+    const snap = await getDoc(doc(db, 'artifacts', appId, 'users', searchUid, 'settings', 'profile'));
+    if (snap.exists()) { setGroupMembers(prev => [...prev, { uid: searchUid, ...snap.data() }]); setSearchUid(''); }
+    else alert('User not found.');
   };
 
   if (!user || user.isAnonymous) return (
@@ -436,27 +724,49 @@ function MessagesPage({ user, userProfile, isEmailVerified, onShowAuth }) {
           )}
         </div>
       </div>
-
-      <div className="flex-1 overflow-y-auto p-8 space-y-6 no-scrollbar bg-slate-50/20">
+      <div ref={chatContainerRef} onScroll={handleScroll} className="flex-1 overflow-y-auto p-8 space-y-6 no-scrollbar bg-slate-50/20">
         {messages.length === 0 ? (
           <div className="h-full flex items-center justify-center text-slate-300 font-black text-xs uppercase tracking-widest">No messages yet. Say hello!</div>
         ) : (
           messages.map(m => (
             <div key={m.id} className={`max-w-[80%] flex flex-col ${m.userId === user.uid ? 'items-end self-end' : 'items-start self-start'}`}>
               <span className="text-[10px] font-black uppercase text-slate-400 mb-1 px-3">{m.userName}</span>
-              <div className={`p-5 rounded-[2rem] text-sm font-medium leading-relaxed shadow-sm ${m.userId === user.uid ? 'bg-indigo-600 text-white rounded-tr-none' : 'bg-white text-slate-700 border border-slate-100 rounded-tl-none'}`}>
-                {m.text}
+              {m.replyTo && (
+                <div className="text-[10px] font-bold text-slate-400 bg-slate-100 rounded-2xl px-4 py-2 mb-1 max-w-[90%] truncate">
+                  ↩ {m.replyTo.userName}: {m.replyTo.text?.slice(0, 50)}
+                </div>
+              )}
+              {editingId === m.id ? (
+                <div className="flex gap-2 w-full">
+                  <input value={editText} onChange={e => setEditText(e.target.value)} className="flex-1 bg-slate-50 rounded-[2rem] px-4 py-2 outline-none font-bold text-sm border-2 border-indigo-100" />
+                  <button onClick={() => handleEdit(m.id)} className="bg-indigo-600 text-white px-4 py-2 rounded-[2rem] font-black text-xs">Save</button>
+                  <button onClick={() => setEditingId(null)} className="border-2 border-slate-100 text-slate-400 px-4 py-2 rounded-[2rem] font-black text-xs">Cancel</button>
+                </div>
+              ) : (
+                <div className={`p-5 rounded-[2rem] text-sm font-medium leading-relaxed shadow-sm ${m.userId === user.uid ? 'bg-indigo-600 text-white rounded-tr-none' : 'bg-white text-slate-700 border border-slate-100 rounded-tl-none'}`}>
+                  <MessageText text={m.text} currentUserName={userProfile?.displayName} />
+                  {m.edited && <span className="text-[10px] opacity-60 ml-2">(edited)</span>}
+                </div>
+              )}
+              <div className={`flex gap-3 mt-1 ${m.userId === user.uid ? 'flex-row-reverse' : 'flex-row'}`}>
+                <button onClick={() => setReplyTo({ id: m.id, text: m.text, userName: m.userName })} className="text-[9px] font-black uppercase text-slate-300 hover:text-indigo-600 transition-colors">↩ Reply</button>
+                {m.userId === user.uid && (
+                  <button onClick={() => { setEditingId(m.id); setEditText(m.text); }} className="text-[9px] font-black uppercase text-slate-300 hover:text-indigo-600 transition-colors">✏️ Edit</button>
+                )}
               </div>
             </div>
           ))
         )}
         <div ref={chatEndRef} />
       </div>
-
-      <div className="p-6 border-t bg-white">
-        {!isEmailVerified && (
-          <p className="text-center text-[10px] font-black uppercase tracking-widest text-rose-400 mb-3">Verify your email to send messages</p>
+      <div className="p-6 border-t bg-white shrink-0">
+        {replyTo && (
+          <div className="flex items-center justify-between bg-indigo-50 rounded-2xl px-4 py-2 mb-3">
+            <p className="text-[10px] font-black uppercase text-indigo-600 truncate">↩ Replying to {replyTo.userName}: {replyTo.text?.slice(0, 40)}...</p>
+            <button onClick={() => setReplyTo(null)} className="text-indigo-300 hover:text-rose-500 ml-2">✕</button>
+          </div>
         )}
+        {!isEmailVerified && <p className="text-center text-[10px] font-black uppercase tracking-widest text-rose-400 mb-3">Verify your email to send messages</p>}
         <form onSubmit={sendMessage} className="flex gap-3">
           <input value={newMessage} onChange={e => setNewMessage(e.target.value)} disabled={!isEmailVerified} placeholder={isEmailVerified ? "Type a message..." : "Email verification required"} className="flex-1 bg-slate-50 rounded-[2rem] px-6 py-4 outline-none font-bold text-sm border-2 border-transparent focus:border-indigo-100 transition-all disabled:opacity-50" />
           <button type="submit" disabled={!isEmailVerified} className="bg-slate-900 text-white px-6 py-4 rounded-[2rem] font-black text-[10px] uppercase tracking-widest shadow-xl active:scale-95 hover:bg-indigo-600 transition-all disabled:opacity-50">Send</button>
@@ -470,15 +780,10 @@ function MessagesPage({ user, userProfile, isEmailVerified, onShowAuth }) {
       <div className="flex items-center justify-between mb-10">
         <div>
           <h2 className="text-4xl font-black italic tracking-tighter uppercase mb-1">Private <span className="text-indigo-600">Messages</span></h2>
-          {!isEmailVerified && (
-            <p className="text-[10px] font-black uppercase tracking-widest text-rose-400">⚠️ Verify your email to unlock messaging</p>
-          )}
+          {!isEmailVerified && <p className="text-[10px] font-black uppercase tracking-widest text-rose-400">⚠️ Verify your email to unlock messaging</p>}
         </div>
-        <button onClick={() => setShowCreateGroup(true)} className="bg-indigo-600 text-white px-5 py-3 rounded-[2rem] font-black text-[10px] uppercase tracking-widest shadow-lg hover:bg-indigo-700 transition-all">
-          + Create Group
-        </button>
+        <button onClick={() => setShowCreateGroup(true)} className="bg-indigo-600 text-white px-5 py-3 rounded-[2rem] font-black text-[10px] uppercase tracking-widest shadow-lg hover:bg-indigo-700 transition-all">+ Create Group</button>
       </div>
-
       {showCreateGroup && (
         <div className="bg-white rounded-[3rem] border border-slate-100 shadow-2xl p-8 mb-8">
           <h3 className="font-black text-lg uppercase tracking-tighter mb-6">Create Group Chat</h3>
@@ -508,15 +813,19 @@ function MessagesPage({ user, userProfile, isEmailVerified, onShowAuth }) {
           </div>
         </div>
       )}
-
       {conversations.length === 0 ? (
         <div className="text-center py-24 text-slate-300 font-black text-xs uppercase tracking-widest">No conversations yet. Start chatting in the hubs to unlock private messages!</div>
       ) : (
         <div className="space-y-4">
           {conversations.map(conv => (
             <button key={conv.id} onClick={() => setActiveConv(conv)} className="w-full flex items-center gap-4 p-6 bg-white rounded-[2.5rem] border border-slate-100 shadow-sm hover:shadow-lg hover:-translate-y-1 transition-all text-left">
-              <div className={`w-12 h-12 rounded-full ${conv.type === 'dm' ? (conv.otherProfile?.color || 'bg-indigo-600') : 'bg-indigo-600'} flex items-center justify-center text-white font-black text-sm shrink-0`}>
+              <div className={`w-12 h-12 rounded-full ${conv.type === 'dm' ? (conv.otherProfile?.color || 'bg-indigo-600') : 'bg-indigo-600'} flex items-center justify-center text-white font-black text-sm shrink-0 relative`}>
                 {conv.type === 'dm' ? (conv.otherProfile?.displayName || 'U')[0] : '👥'}
+                {unreadCounts[conv.id] > 0 && (
+                  <span className="absolute -top-1 -right-1 w-5 h-5 bg-rose-500 rounded-full border-2 border-white text-white text-[8px] font-black flex items-center justify-center">
+                    {unreadCounts[conv.id] > 9 ? '9+' : unreadCounts[conv.id]}
+                  </span>
+                )}
               </div>
               <div>
                 <p className="font-black text-sm uppercase tracking-tight">{conv.type === 'dm' ? conv.otherProfile?.displayName : conv.groupName}</p>
@@ -538,12 +847,7 @@ function GiveAdvicePage({ user, isRegistered, onShowAuth }) {
   const [submitted, setSubmitted] = useState(false);
   const [error, setError] = useState('');
 
-  const toggleCategory = (id) => {
-    setForm(f => ({
-      ...f,
-      categories: f.categories.includes(id) ? f.categories.filter(c => c !== id) : [...f.categories, id]
-    }));
-  };
+  const toggleCategory = (id) => setForm(f => ({ ...f, categories: f.categories.includes(id) ? f.categories.filter(c => c !== id) : [...f.categories, id] }));
 
   const handleFile = (e) => {
     const file = e.target.files[0];
@@ -559,8 +863,7 @@ function GiveAdvicePage({ user, isRegistered, onShowAuth }) {
     if (!isRegistered) { onShowAuth(); return; }
     if (!form.name || !form.email || !form.header || (!form.body && !fileContent)) { setError('Please fill in all required fields.'); return; }
     if (form.categories.length === 0) { setError('Please select at least one category.'); return; }
-    setSubmitting(true);
-    setError('');
+    setSubmitting(true); setError('');
     try {
       await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'submissions'), {
         name: form.name, email: form.email, categories: form.categories,
@@ -577,7 +880,7 @@ function GiveAdvicePage({ user, isRegistered, onShowAuth }) {
     <div className="flex-1 flex flex-col items-center justify-center py-24 px-6 text-center">
       <div className="text-6xl mb-6">🎉</div>
       <h2 className="text-4xl font-black italic tracking-tighter uppercase mb-4">Article <span className="text-indigo-600">Submitted!</span></h2>
-      <p className="text-slate-400 font-medium max-w-md">Your article is under review. Once approved it will appear in the Articles Feed. Thank you for contributing!</p>
+      <p className="text-slate-400 font-medium max-w-md">Your article is under review. Once approved it will appear in the Articles Feed.</p>
     </div>
   );
 
@@ -641,14 +944,8 @@ function ArticlesFeedPage() {
   const [expandedArticle, setExpandedArticle] = useState(null);
 
   useEffect(() => {
-    const q = query(
-      collection(db, 'artifacts', appId, 'public', 'data', 'submissions'),
-      where('status', '==', 'approved'),
-      orderBy('createdAt', 'desc')
-    );
-    const unsub = onSnapshot(q, s => {
-      setArticles(s.docs.map(d => ({ id: d.id, ...d.data() })));
-    });
+    const q = query(collection(db, 'artifacts', appId, 'public', 'data', 'submissions'), where('status', '==', 'approved'), orderBy('createdAt', 'desc'));
+    const unsub = onSnapshot(q, s => setArticles(s.docs.map(d => ({ id: d.id, ...d.data() }))));
     return () => unsub();
   }, []);
 
@@ -660,11 +957,7 @@ function ArticlesFeedPage() {
       <button onClick={() => setExpandedArticle(null)} className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-slate-400 hover:text-indigo-600 transition-colors mb-10">← Back to Articles</button>
       <div className="bg-white rounded-[4rem] shadow-2xl border border-slate-100 p-8 md:p-16">
         <div className="flex flex-wrap gap-2 mb-6">
-          {expandedArticle.categories?.map(c => (
-            <span key={c} className="px-4 py-1.5 bg-indigo-50 text-indigo-600 rounded-full font-black text-[10px] uppercase tracking-widest">
-              {ADVICE_CATEGORIES.find(x => x.id === c)?.name || c}
-            </span>
-          ))}
+          {expandedArticle.categories?.map(c => <span key={c} className="px-4 py-1.5 bg-indigo-50 text-indigo-600 rounded-full font-black text-[10px] uppercase tracking-widest">{ADVICE_CATEGORIES.find(x => x.id === c)?.name || c}</span>)}
         </div>
         <h1 className="text-4xl font-black italic tracking-tighter uppercase mb-4">{expandedArticle.header}</h1>
         <p className="text-[11px] font-black uppercase tracking-widest text-slate-400 mb-10">By {expandedArticle.name}</p>
@@ -697,11 +990,7 @@ function ArticlesFeedPage() {
           {filtered.map(article => (
             <div key={article.id} onClick={() => setExpandedArticle(article)} className="bg-white rounded-[3rem] border border-slate-100 shadow-sm hover:shadow-2xl hover:-translate-y-2 transition-all cursor-pointer p-8">
               <div className="flex flex-wrap gap-2 mb-4">
-                {article.categories?.map(c => (
-                  <span key={c} className="px-3 py-1 bg-indigo-50 text-indigo-600 rounded-full font-black text-[9px] uppercase tracking-widest">
-                    {ADVICE_CATEGORIES.find(x => x.id === c)?.name || c}
-                  </span>
-                ))}
+                {article.categories?.map(c => <span key={c} className="px-3 py-1 bg-indigo-50 text-indigo-600 rounded-full font-black text-[9px] uppercase tracking-widest">{ADVICE_CATEGORIES.find(x => x.id === c)?.name || c}</span>)}
               </div>
               <h3 className="font-black text-lg uppercase tracking-tighter mb-3 leading-tight">{article.header}</h3>
               <p className="text-slate-400 text-sm font-medium leading-relaxed line-clamp-3">{article.body?.slice(0, 150)}...</p>
@@ -721,14 +1010,8 @@ function AdminPage({ user, isAdmin }) {
 
   useEffect(() => {
     if (!isAdmin) return;
-    const q = query(
-      collection(db, 'artifacts', appId, 'public', 'data', 'submissions'),
-      where('status', '==', filter),
-      orderBy('createdAt', 'desc')
-    );
-    const unsub = onSnapshot(q, s => {
-      setSubmissions(s.docs.map(d => ({ id: d.id, ...d.data() })));
-    });
+    const q = query(collection(db, 'artifacts', appId, 'public', 'data', 'submissions'), where('status', '==', filter), orderBy('createdAt', 'desc'));
+    const unsub = onSnapshot(q, s => setSubmissions(s.docs.map(d => ({ id: d.id, ...d.data() }))));
     return () => unsub();
   }, [isAdmin, filter]);
 
@@ -755,9 +1038,7 @@ function AdminPage({ user, isAdmin }) {
       </div>
       <div className="flex gap-3 mb-10">
         {['pending', 'approved', 'rejected'].map(s => (
-          <button key={s} onClick={() => setFilter(s)} className={`px-6 py-3 rounded-[2rem] font-black text-[11px] uppercase transition-all border-2 ${filter === s ? 'bg-indigo-600 text-white border-indigo-600 shadow-lg' : 'border-slate-100 text-slate-500 hover:bg-slate-50'}`}>
-            {s}
-          </button>
+          <button key={s} onClick={() => setFilter(s)} className={`px-6 py-3 rounded-[2rem] font-black text-[11px] uppercase transition-all border-2 ${filter === s ? 'bg-indigo-600 text-white border-indigo-600 shadow-lg' : 'border-slate-100 text-slate-500 hover:bg-slate-50'}`}>{s}</button>
         ))}
       </div>
       {submissions.length === 0 ? (
@@ -771,11 +1052,7 @@ function AdminPage({ user, isAdmin }) {
                   <h3 className="font-black text-lg uppercase tracking-tighter mb-1">{sub.header}</h3>
                   <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">By {sub.name} · {sub.email}</p>
                   <div className="flex flex-wrap gap-2 mt-2">
-                    {sub.categories?.map(c => (
-                      <span key={c} className="px-3 py-1 bg-indigo-50 text-indigo-600 rounded-full font-black text-[9px] uppercase tracking-widest">
-                        {ADVICE_CATEGORIES.find(x => x.id === c)?.name || c}
-                      </span>
-                    ))}
+                    {sub.categories?.map(c => <span key={c} className="px-3 py-1 bg-indigo-50 text-indigo-600 rounded-full font-black text-[9px] uppercase tracking-widest">{ADVICE_CATEGORIES.find(x => x.id === c)?.name || c}</span>)}
                   </div>
                 </div>
                 <button onClick={() => setExpandedId(expandedId === sub.id ? null : sub.id)} className="text-[10px] font-black uppercase tracking-widest text-indigo-600 shrink-0">
@@ -783,9 +1060,7 @@ function AdminPage({ user, isAdmin }) {
                 </button>
               </div>
               {expandedId === sub.id && (
-                <div className="bg-slate-50 rounded-[2rem] p-6 mb-6 text-sm text-slate-600 font-medium leading-relaxed whitespace-pre-wrap max-h-64 overflow-y-auto">
-                  {sub.body}
-                </div>
+                <div className="bg-slate-50 rounded-[2rem] p-6 mb-6 text-sm text-slate-600 font-medium leading-relaxed whitespace-pre-wrap max-h-64 overflow-y-auto">{sub.body}</div>
               )}
               {filter === 'pending' && (
                 <div className="flex gap-3">
@@ -793,12 +1068,8 @@ function AdminPage({ user, isAdmin }) {
                   <button onClick={() => updateStatus(sub.id, 'rejected')} className="flex-1 bg-rose-500 text-white py-3 rounded-[2rem] font-black text-[11px] uppercase tracking-widest hover:bg-rose-600 transition-all shadow-lg">❌ Reject</button>
                 </div>
               )}
-              {filter === 'approved' && (
-                <button onClick={() => updateStatus(sub.id, 'rejected')} className="w-full border-2 border-rose-200 text-rose-400 py-3 rounded-[2rem] font-black text-[11px] uppercase tracking-widest hover:bg-rose-50 transition-all">Revoke Approval</button>
-              )}
-              {filter === 'rejected' && (
-                <button onClick={() => updateStatus(sub.id, 'approved')} className="w-full border-2 border-emerald-200 text-emerald-500 py-3 rounded-[2rem] font-black text-[11px] uppercase tracking-widest hover:bg-emerald-50 transition-all">Approve After All</button>
-              )}
+              {filter === 'approved' && <button onClick={() => updateStatus(sub.id, 'rejected')} className="w-full border-2 border-rose-200 text-rose-400 py-3 rounded-[2rem] font-black text-[11px] uppercase tracking-widest hover:bg-rose-50 transition-all">Revoke Approval</button>}
+              {filter === 'rejected' && <button onClick={() => updateStatus(sub.id, 'approved')} className="w-full border-2 border-emerald-200 text-emerald-500 py-3 rounded-[2rem] font-black text-[11px] uppercase tracking-widest hover:bg-emerald-50 transition-all">Approve After All</button>}
             </div>
           ))}
         </div>
@@ -813,14 +1084,11 @@ export default function App() {
   const [genre, setGenre] = useState('fantasy');
   const [selectedLang, setSelectedLang] = useState('chinese');
   const [messages, setMessages] = useState([]);
-  const [newMessage, setNewMessage] = useState('');
   const [isMenuOpen, setIsMenuOpen] = useState(false);
-  const [isDMOpen, setIsDMOpen] = useState(false);
   const [userProfile, setUserProfile] = useState({ displayName: 'Guest', color: 'bg-indigo-600', role: 'Reader', description: '' });
   const [isSaving, setIsSaving] = useState(false);
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [profilePopup, setProfilePopup] = useState(null);
-  const chatEndRef = useRef(null);
 
   useEffect(() => {
     const initAuth = async () => {
@@ -853,36 +1121,41 @@ export default function App() {
     const pathSegment = getHubKey(view, genre, selectedLang);
     if (!pathSegment) return;
 
-    const q = query(
-      collection(db, 'artifacts', appId, 'public', 'data', pathSegment),
-      orderBy('createdAt', 'asc'),
-      limit(50)
-    );
+    const q = query(collection(db, 'artifacts', appId, 'public', 'data', pathSegment), orderBy('createdAt', 'asc'), limit(50));
     const unsubscribe = onSnapshot(q, s => {
       setMessages(s.docs.map(d => ({ id: d.id, ...d.data() })));
     }, err => console.warn("Firestore error:", err));
     return () => unsubscribe();
   }, [user, view, genre, selectedLang]);
 
-  useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
-
-  const handlePost = async (e) => {
-    e.preventDefault();
-    if (!newMessage.trim() || !user) return;
+  const handlePost = async (text, replyToMsg) => {
+    if (!text.trim() || !user) return;
     if (user.isAnonymous) { setShowAuthModal(true); return; }
     const pathSegment = getHubKey(view, genre, selectedLang);
+    const msgData = {
+      text,
+      userId: user.uid,
+      userName: userProfile.displayName || 'Guest',
+      userColor: userProfile.color || 'bg-indigo-600',
+      createdAt: serverTimestamp()
+    };
+    if (replyToMsg) msgData.replyTo = replyToMsg;
     try {
-      await addDoc(collection(db, 'artifacts', appId, 'public', 'data', pathSegment), {
-        text: newMessage,
-        userId: user.uid,
-        userName: userProfile.displayName || 'Guest',
-        userColor: userProfile.color || 'bg-indigo-600',
-        createdAt: serverTimestamp()
-      });
+      await addDoc(collection(db, 'artifacts', appId, 'public', 'data', pathSegment), msgData);
       await trackActivity(user.uid, pathSegment);
-      setNewMessage('');
+      const mentionRegex = /@(\S+)/g;
+      let match;
+      while ((match = mentionRegex.exec(text)) !== null) {
+        const mentionedName = match[1].toLowerCase();
+        const mentioned = messages.find(m => m.userName?.toLowerCase() === mentionedName);
+        if (mentioned && mentioned.userId !== user.uid) {
+          await sendNotification(mentioned.userId, 'mention', {
+            senderName: userProfile.displayName || 'Someone',
+            hubName: pathSegment,
+            messagePreview: text.slice(0, 60)
+          });
+        }
+      }
     } catch (err) { console.error("Post error:", err); }
   };
 
@@ -905,7 +1178,6 @@ export default function App() {
   const navigateTo = (v) => {
     setView(v);
     setIsMenuOpen(false);
-    setIsDMOpen(false);
     window.scrollTo(0, 0);
   };
 
@@ -917,7 +1189,7 @@ export default function App() {
     setProfilePopup({ profile, theirUid: msg.userId });
   };
 
-  const handleMessageClick = async (theirUid, theirProfile) => {
+  const handleMessageClick = async (theirUid) => {
     if (!user) return;
     await getOrCreateDM(user.uid, theirUid);
     navigateTo('messages');
@@ -926,12 +1198,11 @@ export default function App() {
   const isRegistered = user && !user.isAnonymous;
   const isEmailVerified = user?.emailVerified || false;
   const isAdmin = !!ADMIN_EMAIL && user?.email === ADMIN_EMAIL;
+  const pathSegment = getHubKey(view, genre, selectedLang);
 
   return (
     <div className="min-h-screen bg-white text-slate-900 font-sans flex flex-col relative overflow-x-hidden">
-      {showAuthModal && (
-        <AuthModal onClose={() => setShowAuthModal(false)} onSuccess={() => setShowAuthModal(false)} />
-      )}
+      {showAuthModal && <AuthModal onClose={() => setShowAuthModal(false)} onSuccess={() => setShowAuthModal(false)} />}
 
       {profilePopup && (
         <ProfilePopup
@@ -952,10 +1223,11 @@ export default function App() {
           </button>
           <div className="text-2xl font-black italic tracking-tighter cursor-pointer select-none" onClick={() => navigateTo('home')}>HUB.</div>
         </div>
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-2">
           {!isRegistered && (
             <button onClick={() => setShowAuthModal(true)} className="px-4 py-1.5 bg-indigo-600 text-white rounded-full font-black text-[10px] uppercase tracking-widest hover:bg-indigo-700 transition-all shadow-lg whitespace-nowrap">Sign Up</button>
           )}
+          <NotificationBell user={user} />
           <button onClick={() => navigateTo('messages')} className="p-3 text-slate-400 hover:text-indigo-600 relative transition-colors">
             <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" /></svg>
           </button>
@@ -1026,12 +1298,8 @@ export default function App() {
                 <div>
                   <h2 className="text-4xl font-black italic tracking-tighter uppercase leading-none mb-2">My <span className="text-indigo-600">Profile</span></h2>
                   {isRegistered && <p className="text-xs text-slate-400 font-bold">{user.email}</p>}
-                  {isRegistered && !isEmailVerified && (
-                    <p className="text-[10px] font-black uppercase tracking-widest text-rose-400 mt-1">⚠️ Email not verified — check your inbox</p>
-                  )}
-                  {!isRegistered && (
-                    <button onClick={() => setShowAuthModal(true)} className="text-[10px] font-black uppercase tracking-widest text-indigo-600 hover:underline">Create an account →</button>
-                  )}
+                  {isRegistered && !isEmailVerified && <p className="text-[10px] font-black uppercase tracking-widest text-rose-400 mt-1">⚠️ Email not verified — check your inbox</p>}
+                  {!isRegistered && <button onClick={() => setShowAuthModal(true)} className="text-[10px] font-black uppercase tracking-widest text-indigo-600 hover:underline">Create an account →</button>}
                 </div>
               </div>
               <div className="space-y-8">
@@ -1063,9 +1331,7 @@ export default function App() {
                 {isSaving ? 'Updating...' : 'Save Changes'}
               </button>
               {isRegistered && (
-                <button onClick={handleSignOut} className="w-full border-2 border-slate-100 text-slate-400 py-4 rounded-[2.5rem] font-black text-xs uppercase tracking-widest hover:border-rose-200 hover:text-rose-400 transition-all">
-                  Sign Out
-                </button>
+                <button onClick={handleSignOut} className="w-full border-2 border-slate-100 text-slate-400 py-4 rounded-[2.5rem] font-black text-xs uppercase tracking-widest hover:border-rose-200 hover:text-rose-400 transition-all">Sign Out</button>
               )}
             </div>
           </div>
@@ -1088,15 +1354,10 @@ export default function App() {
           </div>
         )}
 
-        {view === 'give-advice' && (
-          <GiveAdvicePage user={user} isRegistered={isRegistered} onShowAuth={() => setShowAuthModal(true)} />
-        )}
-
+        {view === 'give-advice' && <GiveAdvicePage user={user} isRegistered={isRegistered} onShowAuth={() => setShowAuthModal(true)} />}
         {view === 'articles-feed' && <ArticlesFeedPage />}
         {view === 'admin' && <AdminPage user={user} isAdmin={isAdmin} />}
-        {view === 'messages' && (
-          <MessagesPage user={user} userProfile={userProfile} isEmailVerified={isEmailVerified} onShowAuth={() => setShowAuthModal(true)} />
-        )}
+        {view === 'messages' && <MessagesPage user={user} userProfile={userProfile} isEmailVerified={isEmailVerified} onShowAuth={() => setShowAuthModal(true)} />}
 
         {!['home', 'support', 'about', 'profile', 'give-advice', 'articles-feed', 'admin', 'messages'].includes(view) && (
           <div className="max-w-7xl mx-auto w-full p-4 md:p-8 flex flex-col md:flex-row gap-8 flex-1">
@@ -1123,7 +1384,7 @@ export default function App() {
                 </div>
               )}
 
-              <header className="p-10 border-b flex items-center justify-between">
+              <header className="p-10 border-b flex items-center justify-between shrink-0">
                 <div className="flex items-center gap-5">
                   <div className="w-16 h-16 bg-slate-50 rounded-[1.5rem] flex items-center justify-center text-3xl shadow-inner border border-slate-100">
                     {(view === 'languages' ? LANGUAGES.find(l => l.id === selectedLang) : GENRES.find(g => g.id === genre))?.icon}
@@ -1133,44 +1394,20 @@ export default function App() {
                   </h2>
                 </div>
                 {isRegistered && (
-                  <button onClick={() => navigateTo('messages')} className="text-[10px] font-black uppercase tracking-widest text-indigo-600 hover:underline flex items-center gap-2">
-                    💬 Messages
-                  </button>
+                  <button onClick={() => navigateTo('messages')} className="text-[10px] font-black uppercase tracking-widest text-indigo-600 hover:underline flex items-center gap-2">💬 Messages</button>
                 )}
               </header>
 
-              <div className="flex-1 overflow-y-auto p-8 md:p-12 space-y-8 no-scrollbar bg-slate-50/20">
-                {messages.length === 0 ? (
-                  <div className="h-full flex items-center justify-center text-slate-300 font-black text-xs uppercase tracking-widest">Start the conversation...</div>
-                ) : (
-                  messages.map(m => (
-                    <div key={m.id} className={`max-w-[85%] flex flex-col ${m.userId === user?.uid ? 'items-end self-end' : 'items-start self-start'}`}>
-                      <div className={`flex items-center gap-2 mb-2 ${m.userId === user?.uid ? 'flex-row-reverse' : 'flex-row'}`}>
-                        <button onClick={() => handleAvatarClick(m)} className={`w-8 h-8 rounded-full ${m.userColor || 'bg-indigo-600'} flex items-center justify-center text-white font-black text-xs shadow-md hover:scale-110 transition-transform ${m.userId === user?.uid ? 'cursor-default' : 'cursor-pointer'}`}>
-                          {(m.userName || 'U')[0]}
-                        </button>
-                        <span className="text-[10px] font-black uppercase text-slate-400 px-1">{m.userName || 'Anonymous'}</span>
-                      </div>
-                      <div className={`p-6 rounded-[2.5rem] text-[15px] font-medium leading-relaxed shadow-sm ${m.userId === user?.uid ? 'bg-indigo-600 text-white rounded-tr-none' : 'bg-white text-slate-700 border border-slate-100 rounded-tl-none'}`}>
-                        {m.text}
-                      </div>
-                    </div>
-                  ))
-                )}
-                <div ref={chatEndRef} />
-              </div>
-
-              <div className="p-4 md:p-10 border-t bg-white shrink-0">
-                {!isRegistered && (
-                  <p className="text-center text-[10px] font-black uppercase tracking-widest text-slate-400 mb-4">
-                    <button onClick={() => setShowAuthModal(true)} className="text-indigo-600 hover:underline">Sign up</button> to join the conversation
-                  </p>
-                )}
-                <form onSubmit={handlePost} className="flex flex-row gap-2 max-w-5xl mx-auto w-full">
-                  <input value={newMessage} onChange={e => setNewMessage(e.target.value)} placeholder={isRegistered ? "Share thoughts..." : "Sign up to post..."} className="flex-1 min-w-0 bg-slate-50 rounded-[2.5rem] px-6 py-4 outline-none font-bold text-sm border-2 border-transparent focus:border-indigo-100 transition-all" />
-                  <button type="submit" className="bg-slate-900 text-white px-6 py-4 rounded-[2.5rem] font-black text-[10px] uppercase tracking-widest shadow-2xl active:scale-95 hover:bg-indigo-600 transition-all shrink-0">Send 🚀</button>
-                </form>
-              </div>
+              <ChatBox
+                messages={messages}
+                user={user}
+                userProfile={userProfile}
+                isRegistered={isRegistered}
+                onPost={handlePost}
+                onShowAuth={() => setShowAuthModal(true)}
+                pathSegment={pathSegment}
+                onAvatarClick={handleAvatarClick}
+              />
             </div>
           </div>
         )}
